@@ -648,8 +648,12 @@ export default function Library() {
             <span className="avatar small">S</span>
           </div>
         </header>
-        <div className="main-content">
-          {groupId === "all" && view === "all" && (
+        <div
+          className={
+            connected ? "main-content drive-connected" : "main-content"
+          }
+        >
+          {!connected && groupId === "all" && view === "all" && (
             <section className="welcome">
               <div className="welcome-copy">
                 <span className="eyebrow">

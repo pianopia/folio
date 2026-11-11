@@ -35,6 +35,7 @@ export default function App() {
     [token, setToken] = useState(""),
     [ready, setReady] = useState(false),
     [mode, setMode] = useState("demo"),
+    [driveConnected, setDriveConnected] = useState(false),
     [query, setQuery] = useState(""),
     [group, setGroup] = useState("all"),
     [tab, setTab] = useState("all"),
@@ -140,10 +141,16 @@ export default function App() {
       if (!me.user) throw Error("ログインしてください");
       setUserEmail(me.user.email);
       setUserId(me.user.id);
-      setData(await request<Data>("/library"));
+      const [library, driveStatus] = await Promise.all([
+        request<Data>("/library"),
+        request<{ connected: boolean }>("/drive/status"),
+      ]);
+      setData(library);
+      setDriveConnected(driveStatus.connected);
       setMode("live");
     } catch {
       setData(initial);
+      setDriveConnected(false);
       setSelected(null);
       setFiles([]);
       setChosen([]);
@@ -330,24 +337,26 @@ export default function App() {
         }}
         ListHeaderComponent={
           <>
-            <View style={s.hero}>
-              <Text style={s.eyebrow}>A LITTLE SPACE FOR BIG IDEAS</Text>
-              <Text style={s.heroTitle}>
-                Your creative world,{String.fromCharCode(10)}all in one place.
-              </Text>
-              <Text style={s.heroNote}>
-                ひらめきも、つくったものも。ひとつの場所に。
-              </Text>
-              <Pressable
-                onPress={() => {
-                  open("drive");
-                  void drive();
-                }}
-              >
-                <Text style={s.heroLink}>Google Driveから取り込む ↗</Text>
-              </Pressable>
-              <Text style={s.heroStar}>✳</Text>
-            </View>
+            {!driveConnected && (
+              <View style={s.hero}>
+                <Text style={s.eyebrow}>A LITTLE SPACE FOR BIG IDEAS</Text>
+                <Text style={s.heroTitle}>
+                  Your creative world,{String.fromCharCode(10)}all in one place.
+                </Text>
+                <Text style={s.heroNote}>
+                  ひらめきも、つくったものも。ひとつの場所に。
+                </Text>
+                <Pressable
+                  onPress={() => {
+                    open("drive");
+                    void drive();
+                  }}
+                >
+                  <Text style={s.heroLink}>Google Driveから取り込む ↗</Text>
+                </Pressable>
+                <Text style={s.heroStar}>✳</Text>
+              </View>
+            )}
             <View style={s.titleRow}>
               <Text style={s.heading}>
                 {tab === "favorites" ? "Favorites" : "All artworks"}{" "}

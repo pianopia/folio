@@ -1978,3 +1978,7 @@ main {
     max-width: 130px;
   }
 }
+
+.main-content.drive-connected > .section-heading:first-child {
+  margin-top: 0;
+}
