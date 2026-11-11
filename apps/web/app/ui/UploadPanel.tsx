@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import UploadPreview from "./UploadPreview";
 import type { Artwork, Group } from "@folio/shared";
 import { apiBase, getAuthToken, request } from "./api";
 type Item = {
@@ -75,6 +76,7 @@ export default function UploadPanel({
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [dragging, setDragging] = useState(false);
+  const [previewId, setPreviewId] = useState<string | null>(null);
   const mounted = useRef(true);
   const previews = useRef<string[]>([]),
     input = useRef<HTMLInputElement>(null);
@@ -96,37 +98,71 @@ export default function UploadPanel({
   }, []);
   function select(files: FileList | File[]) {
     if (busy) return;
+    const incoming = Array.from(files);
+    if (!incoming.length) return;
     setError("");
-    if (files.length > 10) {
-      setError("一度に選択できる画像は10枚までです");
+    const existing = items.filter((item) => item.state !== "done");
+    const unique = incoming.filter(
+      (file, index) =>
+        !existing.some(
+          (item) =>
+            item.file.name === file.name &&
+            item.file.size === file.size &&
+            item.file.lastModified === file.lastModified,
+        ) &&
+        incoming.findIndex(
+          (other) =>
+            other.name === file.name &&
+            other.size === file.size &&
+            other.lastModified === file.lastModified,
+        ) === index,
+    );
+    if (existing.length + unique.length > 10) {
+      setError(
+        "一度に選択できる画像は合計10枚までです。不要な画像を外してから追加してください",
+      );
       return;
     }
-    const selected: Item[] = [];
-    for (const file of Array.from(files)) {
-      if (
-        file.size > 20 * 1024 * 1024 ||
-        !["image/jpeg", "image/png", "image/webp", "image/gif"].includes(
-          file.type,
-        )
-      ) {
-        setError("JPEG・PNG・WebP・GIFを1枚20MB以下で選択してください");
-        return;
-      }
-      const preview = URL.createObjectURL(file);
-      previews.current.push(preview);
-      selected.push({
-        id: crypto.randomUUID(),
-        file,
-        preview,
-        state: "ready",
-        progress: 0,
-      });
+    if (
+      unique.some(
+        (file) =>
+          file.size > 20 * 1024 * 1024 ||
+          !["image/jpeg", "image/png", "image/webp", "image/gif"].includes(
+            file.type,
+          ),
+      )
+    ) {
+      setError("JPEG・PNG・WebP・GIFを1枚20MB以下で選択してください");
+      return;
     }
+    const added: Item[] = unique.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      preview: URL.createObjectURL(file),
+      state: "ready",
+      progress: 0,
+    }));
+    const selected = [...existing, ...added];
     previews.current
-      .filter((url) => !selected.some((i) => i.preview === url))
+      .filter((url) => !selected.some((item) => item.preview === url))
       .forEach(URL.revokeObjectURL);
-    previews.current = selected.map((i) => i.preview);
+    previews.current = selected.map((item) => item.preview);
+    setPreviewId(null);
     setItems(selected);
+  }
+  function remove(id: string) {
+    if (busy) return;
+    const index = items.findIndex((item) => item.id === id);
+    const item = items[index];
+    if (!item) return;
+    const remaining = items.filter((item) => item.id !== id);
+    if (previewId === id)
+      setPreviewId(
+        remaining[Math.min(index, remaining.length - 1)]?.id ?? null,
+      );
+    URL.revokeObjectURL(item.preview);
+    previews.current = previews.current.filter((url) => url !== item.preview);
+    setItems(remaining);
   }
   function change(id: string, patch: Partial<Item>) {
     setItems((old) => old.map((i) => (i.id === id ? { ...i, ...patch } : i)));
@@ -136,6 +172,7 @@ export default function UploadPanel({
       setError("保存するグループとコレクションを選択してください");
       return;
     }
+    setPreviewId(null);
     setBusy(true);
     setError("");
     try {
@@ -205,17 +242,22 @@ export default function UploadPanel({
         }}
       >
         <span className="upload-plus">＋</span>
-        <strong>画像をドロップ、または選択</strong>
+        <strong>
+          {items.some((item) => item.state !== "done")
+            ? "画像を追加で選択・ドロップ"
+            : "複数の画像を選択・ドロップ"}
+        </strong>
         <span>JPEG / PNG / WebP / GIF · 1枚20MBまで · 最大10枚</span>
         <input
           ref={input}
           type="file"
           aria-label="アップロードする画像"
-          accept="image/jpeg,image/png,image/webp,image/gif"
+          accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"
           multiple
           disabled={busy || !status?.canUpload}
           onChange={(e) => {
             if (e.target.files) select(e.target.files);
+            e.target.value = "";
           }}
         />
       </label>
@@ -247,10 +289,32 @@ export default function UploadPanel({
       <p className="field-note">
         共有メンバーがいるグループを選ぶと、アップロードした作品もそのメンバーに表示されます。
       </p>
+      {items.length > 0 && (
+        <div className="upload-selection-summary">
+          <strong>
+            {items.every((item) => item.state === "done")
+              ? `${items.length}枚をアップロードしました`
+              : `${items.filter((item) => item.state !== "done").length}枚を選択中`}
+          </strong>
+          <span>サムネイルをクリックすると大きく確認できます</span>
+          {items.every((item) => item.state === "done") && (
+            <span>すべて保存しました</span>
+          )}
+        </div>
+      )}
       <ul className="upload-items">
         {items.map((item) => (
           <li key={item.id}>
-            <img src={item.preview} alt="" />
+            <button
+              type="button"
+              className="upload-thumbnail-button"
+              onClick={() => setPreviewId(item.id)}
+              aria-label={`${item.file.name}を大きくプレビュー`}
+              disabled={busy}
+            >
+              <img src={item.preview} alt="" />
+              <span>拡大</span>
+            </button>
             <div>
               <strong>{item.file.name}</strong>
               <span>
@@ -271,6 +335,15 @@ export default function UploadPanel({
                 </p>
               )}
             </div>
+            <button
+              type="button"
+              className="text-button"
+              disabled={busy}
+              onClick={() => remove(item.id)}
+              aria-label={`${item.file.name}を選択から外す`}
+            >
+              外す
+            </button>
           </li>
         ))}
       </ul>
@@ -290,11 +363,26 @@ export default function UploadPanel({
         onClick={submit}
       >
         {busy
-          ? "アップロード中…"
+          ? `${items.filter((item) => item.state === "done").length} / ${items.length}枚を保存中…`
           : items.length && items.every((i) => i.state === "done")
             ? "アップロード完了"
-            : `${items.filter((i) => i.state !== "done").length}枚をアップロード`}
+            : `選択した${items.filter((i) => i.state !== "done").length}枚をまとめてアップロード`}
       </button>
+      {previewId && (
+        <UploadPreview
+          items={items.map((item) => ({
+            id: item.id,
+            preview: item.preview,
+            name: item.file.name,
+            size: item.file.size,
+            uploaded: item.state === "done",
+          }))}
+          selectedId={previewId}
+          onSelect={setPreviewId}
+          onClose={() => setPreviewId(null)}
+          onRemove={busy ? undefined : remove}
+        />
+      )}
     </section>
   );
 }

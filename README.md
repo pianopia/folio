@@ -104,7 +104,7 @@ Google OAuth credentials must be configured separately; deploying the service do
 
 ## Image uploads
 
-Choose **作品を追加** to select or drop up to 10 images. Each image is uploaded separately with progress and per-file errors; successful files stay saved when another file fails. Supported originals: JPEG, PNG, WebP and GIF, up to 20 MiB and 32 million pixels each. The server decodes images to validate their actual format and creates bounded 512/1024px WebP previews. SVG, HTML and invalid image payloads are rejected.
+Choose **作品を追加** to select or drop up to 10 images. Click any selected thumbnail to inspect it at full size, move between images with the buttons or arrow keys, and remove unwanted files before uploading. Additional file selections and drops keep the pending selection, deduplicate the same files and enforce a combined limit of ten. One button uploads the entire selection with overall and per-file progress; successful files stay saved when another file fails. Supported originals: JPEG, PNG, WebP and GIF, up to 20 MiB and 32 million pixels each. The server decodes images to validate their actual format and creates bounded 512/1024px WebP previews. SVG, HTML and invalid image payloads are rejected.
 
 The server selects the destination from the signed-in user's connection: connected accounts save to their own **Folio uploads** folder in Drive, and unconnected accounts save to private Cloud Storage. Missing Drive write permission asks for reauthorization; Drive failures never silently switch storage providers. Drive originals are kept when removing a library item. Removing a Cloud Storage artwork deletes its managed original and preview objects; a failed initial registration cleans up the objects created by that request.
 
@@ -130,13 +130,13 @@ Google Drive is connected from the Web first. The mobile app then uses the same 
 
 ```sh
 bun run check
-bun test apps/api
+bun run test
 bun run build
 cd apps/mobile
 bunx expo export --platform all --output-dir /tmp/folio-mobile-export
 ```
 
-The API tests exercise cross-user isolation, group membership and revocation, rejection of legacy shared tokens, session revocation, one-time legacy migration, single-use mobile grants, signed Google ID-token validation, OAuth state/nonce/PKCE, per-user thumbnail caching, persistence, concurrency limits, and expiry recovery. Local tests use isolated in-memory libSQL databases. Real Google-account latency depends on the connected Drive; the preview tests use a simulated Drive provider.
+The API tests exercise cross-user isolation, group membership and revocation, rejection of legacy shared tokens, session revocation, one-time legacy migration, single-use mobile grants, signed Google ID-token validation, OAuth state/nonce/PKCE, per-user thumbnail caching, persistence, concurrency limits, and expiry recovery. Upload UI tests cover preview/navigation/removal before upload, additional selection and drops, the combined selection limit, sending the complete selection with one action, and retrying only failed files. Local API tests use isolated in-memory libSQL databases. Real Google-account latency depends on the connected Drive; the preview tests use a simulated Drive provider.
 
 ## API overview
 
