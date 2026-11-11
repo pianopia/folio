@@ -1,140 +1,348 @@
 import { test, expect } from "bun:test";
 import { createApp } from "./src/app";
+import { alice, bob, addUser, client } from "./test-support";
+import { hash, verifyGoogleIdentity } from "./src/auth";
+import { generateKeyPair, exportJWK, SignJWT } from "jose";
 
-test("OAuth validates state, stores encrypted tokens, serves authenticated previews, and revokes access", async () => {
+test("OAuth is state/nonce/PKCE bound, private to each account, and sharing only authorizes one imported artwork", async () => {
   const keys = [
     "GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET",
     "TOKEN_ENCRYPTION_KEY",
     "API_ORIGIN",
-  ] as const;
-  const previous = Object.fromEntries(
-    keys.map((key) => [key, process.env[key]])
-  );
-  const originalFetch = globalThis.fetch;
+  ];
+  const old = Object.fromEntries(keys.map((k) => [k, process.env[k]])),
+    originalFetch = globalThis.fetch;
   Object.assign(process.env, {
     GOOGLE_CLIENT_ID: "fixture.apps.googleusercontent.com",
     GOOGLE_CLIENT_SECRET: "fixture-secret",
     TOKEN_ENCRYPTION_KEY: "c".repeat(64),
     API_ORIGIN: "https://folio.example",
   });
-  let imageRequests = 0,
-    revoked = false;
+  let nonce = "",
+    nextIdentity = alice,
+    previewRequests: string[] = [],
+    imageRequests: string[] = [],
+    revoked: string[] = [];
   globalThis.fetch = (async (input: any, init?: RequestInit) => {
-    const url = String(input);
+    const url = String(input),
+      auth = new Headers(init?.headers).get("Authorization") ?? "";
     if (url === "https://oauth2.googleapis.com/token") {
       const body = init?.body as URLSearchParams;
-      expect(body.get("redirect_uri")).toBe(
-        "https://folio.example/api/drive/callback"
-      );
-      expect(body.get("grant_type")).toBe("authorization_code");
+      expect(body.get("code_verifier")).toBeString();
       return Response.json({
-        access_token: "fixture-access",
-        refresh_token: "fixture-refresh",
+        id_token: "signed-provider-token",
+        access_token: nextIdentity.id + "-access",
+        refresh_token: nextIdentity.id + "-refresh",
         expires_in: 3600,
+        scope:
+          "openid email profile https://www.googleapis.com/auth/drive.readonly",
       });
     }
     if (url.startsWith("https://www.googleapis.com/drive/v3/files?"))
       return Response.json({
         files: [
           {
-            id: "fixture-image",
-            name: "Artwork.png",
+            id: "same-file-id",
+            name: "Private.png",
             mimeType: "image/png",
             thumbnailLink:
-              "https://lh3.googleusercontent.com/drive-storage/fixture=s220",
+              "https://lh3.googleusercontent.com/drive-storage/same=s220",
             thumbnailVersion: "1",
           },
         ],
       });
+    if (
+      url.startsWith(
+        "https://www.googleapis.com/drive/v3/files/same-file-id?alt=media",
+      )
+    ) {
+      imageRequests.push(auth);
+      return new Response(auth, { headers: { "Content-Type": "image/png" } });
+    }
     if (url.startsWith("https://lh3.googleusercontent.com/")) {
-      imageRequests++;
-      expect(new Headers(init?.headers).get("Authorization")).toBe(
-        "Bearer fixture-access"
-      );
-      return new Response(new Uint8Array([137, 80, 78, 71]), {
-        headers: { "Content-Type": "image/png" },
-      });
+      previewRequests.push(auth);
+      return new Response(auth, { headers: { "Content-Type": "image/png" } });
     }
     if (url === "https://oauth2.googleapis.com/revoke") {
-      revoked = true;
+      revoked.push((init?.body as URLSearchParams).get("token")!);
       return new Response(null, { status: 200 });
     }
-    throw Error("Unexpected OAuth provider call");
+    throw Error("Unexpected provider call");
   }) as typeof fetch;
   let db: Awaited<ReturnType<typeof createApp>>["db"] | undefined;
   try {
     const created = await createApp({
       database: ":memory:",
-      token: "workspace-fixture",
       webOrigin: "https://folio.example",
+      verifyIdentity: async (token, n) => {
+        expect(token).toBe("signed-provider-token");
+        expect(n).toBe(nonce);
+        return nextIdentity;
+      },
     });
     db = created.db;
-    const call = (path: string, method = "GET", cookie = "") =>
-      created.app.request(`https://folio.example/api${path}`, {
-        method,
-        headers: { Authorization: "Bearer workspace-fixture", Cookie: cookie },
-      });
-    expect(await (await call("/drive/status")).json()).toEqual({
-      configured: true,
-      connected: false,
-    });
-    const connect = await call("/drive/connect");
-    const auth = new URL((await connect.json()).url);
-    const state = auth.searchParams.get("state")!;
-    expect(auth.hostname).toBe("accounts.google.com");
-    expect(auth.searchParams.get("scope")).toBe(
-      "https://www.googleapis.com/auth/drive.readonly"
-    );
-    expect(connect.headers.get("set-cookie")).toContain("HttpOnly");
+    await addUser(db, alice, "a");
+    await addUser(db, bob, "b");
+    const a = client(created.app, "a"),
+      b = client(created.app, "b");
+    async function begin(call: typeof a, login = false) {
+      const response = await call(login ? "/auth/login" : "/drive/connect");
+      const auth = new URL(
+        login ? response.headers.get("location")! : (await response.json()).url,
+      );
+      nonce = auth.searchParams.get("nonce")!;
+      const state = auth.searchParams.get("state")!;
+      expect(auth.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(auth.searchParams.get("code_challenge")).toBeString();
+      return { auth, state, cookie: `folio_oauth=${state}` };
+    }
+    const request = await begin(a);
+    expect(request.auth.searchParams.get("scope")).toContain("drive.readonly");
+    expect(
+      (await a(`/drive/callback?state=${request.state}&code=fixture`)).status,
+    ).toBe(400);
     expect(
       (
-        await call(
-          "/drive/callback?state=wrong&code=fixture",
+        await b(
+          `/drive/callback?state=${request.state}&code=fixture`,
           "GET",
-          `drive_state=${state}`
+          undefined,
+          { Cookie: request.cookie },
         )
-      ).status
-    ).toBe(400);
-    const callback = await call(
-      `/drive/callback?state=${state}&code=fixture`,
-      "GET",
-      `drive_state=${state}`
-    );
-    expect(callback.status).toBe(302);
-    expect(callback.headers.get("location")).toBe(
-      "https://folio.example/?drive=connected"
-    );
-    const encrypted = String(
-      (await db.query("SELECT value FROM secrets WHERE id='google'").get())
-        ?.value
-    );
-    expect(encrypted).not.toContain("fixture-access");
-    expect(encrypted).not.toContain("fixture-refresh");
-    expect(await (await call("/drive/status")).json()).toEqual({
-      configured: true,
-      connected: true,
-    });
-    const files = await (await call("/drive/files")).json();
-    expect(files.files[0].thumbnailUrl).toContain(
-      "/api/drive/thumbnail/fixture-image"
-    );
-    expect(files.files[0].thumbnailLink).toBeUndefined();
-    expect((await call("/drive/thumbnail/fixture-image")).status).toBe(200);
-    expect((await call("/drive/thumbnail/fixture-image")).status).toBe(200);
-    expect(imageRequests).toBe(1);
-    expect((await call("/drive", "DELETE")).status).toBe(200);
-    expect(revoked).toBe(true);
+      ).status,
+    ).toBe(403);
+    const own = await begin(a);
     expect(
-      await db.query("SELECT value FROM secrets WHERE id='google'").get()
-    ).toBeUndefined();
-    expect((await call("/drive/files")).status).toBe(409);
+      (
+        await a(
+          `/drive/callback?state=${own.state}&code=fixture`,
+          "GET",
+          undefined,
+          { Cookie: own.cookie },
+        )
+      ).status,
+    ).toBe(302);
+    expect(
+      (
+        await a(
+          `/drive/callback?state=${own.state}&code=fixture`,
+          "GET",
+          undefined,
+          { Cookie: own.cookie },
+        )
+      ).status,
+    ).toBe(400);
+    const encrypted = String(
+      (
+        await db
+          .query("SELECT value FROM drive_credentials WHERE user_id=?")
+          .get(alice.id)
+      )?.value,
+    );
+    expect(encrypted).not.toContain("access");
+    expect(encrypted).not.toContain("refresh");
+    expect((await (await a("/drive/status")).json()).connected).toBe(true);
+    expect((await (await b("/drive/status")).json()).connected).toBe(false);
+    expect((await b("/drive/files")).status).toBe(409);
+    expect((await b("/drive/image/same-file-id")).status).toBe(409);
+    const list = await (await a("/drive/files")).json();
+    expect(list.files[0].thumbnailLink).toBeUndefined();
+    expect(
+      await (await a(list.files[0].thumbnailUrl.replace("/api", ""))).text(),
+    ).toBe("Bearer google-alice-access");
+    expect(await (await a("/drive/thumbnail/same-file-id")).text()).toBe(
+      "Bearer google-alice-access",
+    );
+    expect(previewRequests).toHaveLength(1);
+    const g = await (
+      await a("/groups", "POST", { name: "Shared selection" })
+    ).json();
+    const art = (
+      await (
+        await a("/drive/import", "POST", {
+          ids: ["same-file-id"],
+          groupId: g.id,
+        })
+      ).json()
+    ).artworks[0];
+    expect(art.url).toContain(`/api/artworks/${art.id}/image`);
+    expect((await b(`/artworks/${art.id}/image`)).status).toBe(404);
+    expect(
+      (await a(`/groups/${g.id}/members`, "POST", { email: bob.email })).status,
+    ).toBe(201);
+    expect(await (await b(`/artworks/${art.id}/image`)).text()).toBe(
+      "Bearer google-alice-access",
+    );
+    expect(await (await b(`/artworks/${art.id}/thumbnail`)).text()).toBe(
+      "Bearer google-alice-access",
+    );
+    expect(imageRequests).toEqual(["Bearer google-alice-access"]);
+    expect((await b("/drive/files")).status).toBe(409);
+    // Connecting a different Google identity must not attach its Drive to Alice.
+    nextIdentity = bob;
+    const mismatch = await begin(a);
+    expect(
+      (
+        await a(
+          `/drive/callback?state=${mismatch.state}&code=fixture`,
+          "GET",
+          undefined,
+          { Cookie: mismatch.cookie },
+        )
+      ).status,
+    ).toBe(403);
+    const bobRequest = await begin(b);
+    expect(
+      (
+        await b(
+          `/drive/callback?state=${bobRequest.state}&code=fixture`,
+          "GET",
+          undefined,
+          { Cookie: bobRequest.cookie },
+        )
+      ).status,
+    ).toBe(302);
+    await b("/drive/files");
+    expect(await (await b("/drive/thumbnail/same-file-id")).text()).toBe(
+      "Bearer google-bob-access",
+    );
+    expect(previewRequests).toEqual([
+      "Bearer google-alice-access",
+      "Bearer google-bob-access",
+    ]);
+    await a(`/groups/${g.id}/members/${bob.id}`, "DELETE");
+    expect((await b(`/artworks/${art.id}/thumbnail`)).status).toBe(404);
+    expect((await b(`/artworks/${art.id}/image`)).status).toBe(404);
+    expect((await b("/drive", "DELETE")).status).toBe(200);
+    expect(revoked).toEqual(["google-bob-refresh"]);
+    expect((await (await a("/drive/status")).json()).connected).toBe(true);
+    expect((await (await b("/drive/status")).json()).connected).toBe(false);
+    // Sign-in only requests identity; it does not silently grant Drive access.
+    const login = await begin(b, true);
+    expect(login.auth.searchParams.get("scope")).toBe("openid email profile");
+    const result = await b(
+      `/drive/callback?state=${login.state}&code=fixture`,
+      "GET",
+      undefined,
+      { Cookie: login.cookie },
+    );
+    expect(result.status).toBe(302);
+    expect(result.headers.get("set-cookie")).toContain("HttpOnly");
+    const cookie = result.headers
+      .getSetCookie()
+      .find((c) => c.startsWith("folio_session="))!
+      .split(";")[0];
+    expect(
+      (
+        await created.app.request("https://folio.example/api/library", {
+          headers: { Cookie: cookie },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await b("/library")).status).toBe(401);
   } finally {
     db?.close();
     globalThis.fetch = originalFetch;
     for (const key of keys) {
-      if (previous[key] === undefined) delete process.env[key];
-      else process.env[key] = previous[key];
+      if (old[key] === undefined) delete process.env[key];
+      else process.env[key] = old[key];
     }
+  }
+});
+
+test("Google ID tokens require a valid signature, issuer, audience, expiry, verified email and nonce", async () => {
+  const original = globalThis.fetch,
+    oldClient = process.env.GOOGLE_CLIENT_ID;
+  process.env.GOOGLE_CLIENT_ID = "identity-test-client";
+  const { privateKey, publicKey } = await generateKeyPair("RS256");
+  const jwk = await exportJWK(publicKey);
+  jwk.kid = "fixture-key";
+  jwk.alg = "RS256";
+  globalThis.fetch = (async () =>
+    Response.json({ keys: [jwk] })) as unknown as typeof fetch;
+  const sign = (overrides: Record<string, unknown> = {}) =>
+    new SignJWT({
+      email: "Alice@Example.com",
+      email_verified: true,
+      name: "Alice",
+      nonce: "expected-nonce",
+      ...overrides,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "fixture-key" })
+      .setIssuer("https://accounts.google.com")
+      .setAudience("identity-test-client")
+      .setSubject("google-alice")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+  try {
+    expect(await verifyGoogleIdentity(await sign(), "expected-nonce")).toEqual(
+      alice,
+    );
+    await expect(
+      verifyGoogleIdentity(await sign(), "wrong-nonce"),
+    ).rejects.toThrow();
+    await expect(
+      verifyGoogleIdentity(
+        await sign({ email_verified: false }),
+        "expected-nonce",
+      ),
+    ).rejects.toThrow();
+    const badAudience = await new SignJWT({
+      nonce: "expected-nonce",
+      email: alice.email,
+      email_verified: true,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "fixture-key" })
+      .setIssuer("https://accounts.google.com")
+      .setAudience("attacker-client")
+      .setSubject(alice.id)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    await expect(
+      verifyGoogleIdentity(badAudience, "expected-nonce"),
+    ).rejects.toThrow();
+    for (const invalid of ["issuer", "expiry"]) {
+      const invalidToken = await new SignJWT({
+        nonce: "expected-nonce",
+        email: alice.email,
+        email_verified: true,
+      })
+        .setProtectedHeader({ alg: "RS256", kid: "fixture-key" })
+        .setIssuer(
+          invalid === "issuer"
+            ? "https://attacker.example"
+            : "https://accounts.google.com",
+        )
+        .setAudience("identity-test-client")
+        .setSubject(alice.id)
+        .setIssuedAt()
+        .setExpirationTime(invalid === "expiry" ? 1 : "5m")
+        .sign(privateKey);
+      await expect(
+        verifyGoogleIdentity(invalidToken, "expected-nonce"),
+      ).rejects.toThrow();
+    }
+    const forged = await new SignJWT({
+      nonce: "expected-nonce",
+      email: alice.email,
+      email_verified: true,
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "fixture-key" })
+      .setIssuer("https://accounts.google.com")
+      .setAudience("identity-test-client")
+      .setSubject(alice.id)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign((await generateKeyPair("RS256")).privateKey);
+    await expect(
+      verifyGoogleIdentity(forged, "expected-nonce"),
+    ).rejects.toThrow();
+  } finally {
+    globalThis.fetch = original;
+    if (oldClient === undefined) delete process.env.GOOGLE_CLIENT_ID;
+    else process.env.GOOGLE_CLIENT_ID = oldClient;
   }
 });

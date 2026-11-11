@@ -32,9 +32,7 @@ export function clearDriveCaches() {
   listeners.forEach((listener) => listener());
 }
 export function previewPath(art: Artwork, size: 512 | 1024 = 512) {
-  return `/api/drive/thumbnail/${encodeURIComponent(
-    art.driveId ?? art.url.split("/").pop()!
-  )}?size=${size}`;
+  return `/api/artworks/${encodeURIComponent(art.id)}/thumbnail?size=${size}`;
 }
 async function limited<T>(work: () => Promise<T>): Promise<T> {
   if (active >= 6) await new Promise<void>((resolve) => queue.push(resolve));

@@ -27,6 +27,7 @@ import {
   Copy,
   LoaderCircle,
 } from "lucide-react";
+import GroupSharing from "./GroupSharing";
 import type { Artwork } from "@folio/shared";
 import {
   request,
@@ -93,6 +94,15 @@ function Dialog({
   );
 }
 export default function Library() {
+  const [user, setUser] = useState<{
+    id: string;
+    email: string;
+    name: string;
+  } | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [demoAllowed, setDemoAllowed] = useState(false);
+  const [deviceCode, setDeviceCode] = useState("");
+  const [deviceApproved, setDeviceApproved] = useState(false);
   const [data, setData] = useState<LibraryData>({ groups: [], artworks: [] });
   const [mode, setMode] = useState<"loading" | "live" | "demo">("loading");
   const [view, setView] = useState("all"),
@@ -123,17 +133,17 @@ export default function Library() {
     try {
       await copyArtworkImage(art);
       notify(
-        "画像をコピーしました。チャットやデザインツールに貼り付けられます。"
+        "画像をコピーしました。チャットやデザインツールに貼り付けられます。",
       );
     } catch (error) {
       notify(
         error instanceof DOMException && error.name === "NotAllowedError"
           ? "コピーが許可されませんでした。ブラウザのクリップボード権限を確認して、もう一度押してください。"
           : error instanceof TypeError
-          ? "画像を取得できませんでした。画像配信元が外部からのコピーを許可しているか確認してください。"
-          : error instanceof Error
-          ? error.message
-          : "画像をコピーできませんでした。"
+            ? "画像を取得できませんでした。画像配信元が外部からのコピーを許可しているか確認してください。"
+            : error instanceof Error
+              ? error.message
+              : "画像をコピーできませんでした。",
       );
     } finally {
       setCopyingId(null);
@@ -147,22 +157,50 @@ export default function Library() {
   }
   async function load() {
     try {
+      const identity = await request<{
+        user: typeof user;
+        configured: boolean;
+      }>("/auth/me");
+      setUser(identity.user);
+      setConfigured(identity.configured);
+      clearDriveCaches();
+      setFiles([]);
+      setChosen([]);
+      setSelected(null);
+      if (!identity.user) {
+        setData({ groups: [], artworks: [] });
+        setConnected(false);
+        setMode("demo");
+        return;
+      }
       const d = await request<LibraryData>("/library");
+      const status = await request<{ connected: boolean }>("/drive/status");
       setData(d);
       setMode("live");
-      const s = await request<{ configured: boolean; connected: boolean }>(
-        "/drive/status"
-      );
-      setConfigured(s.configured);
-      setConnected(s.connected);
-    } catch {
-      setData(sampleData());
-      setMode("demo");
+      setConnected(status.connected);
+    } catch (e) {
+      setData({ groups: [], artworks: [] });
+      setConnected(false);
+      clearDriveCaches();
+      setError((e as Error).message);
+    } finally {
+      setAuthReady(true);
     }
   }
   useEffect(() => {
+    setAuthToken("");
+    const code =
+      new URLSearchParams(window.location.search).get("device") ?? "";
+    if (/^[A-F0-9]{12}$/.test(code)) setDeviceCode(code);
     void load();
-    return () => clearTimeout(toastTimer.current);
+    const refresh = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearTimeout(toastTimer.current);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, []);
   function update(d: LibraryData) {
     setData(d);
@@ -182,6 +220,13 @@ export default function Library() {
     setNavOpen(false);
   }
   async function change(a: Artwork, patch: Partial<Artwork>) {
+    if (
+      mode === "live" &&
+      data.groups.find((g) => g.id === a.groupId)?.ownerId !== user?.id
+    ) {
+      notify("このグループは閲覧のみです");
+      return false;
+    }
     try {
       const updated =
         mode === "demo"
@@ -203,7 +248,7 @@ export default function Library() {
   }
   async function submit(
     e: FormEvent<HTMLFormElement>,
-    kind: "group" | "add" | "edit"
+    kind: "group" | "add" | "edit",
   ) {
     e.preventDefault();
     setBusy(true);
@@ -285,7 +330,11 @@ export default function Library() {
   }
   async function openDrive() {
     open("drive");
-    setImportGroup(groupId === "all" ? data.groups[0]?.id : groupId);
+    setImportGroup(
+      groupId === "all"
+        ? (data.groups.find((g) => g.ownerId === user?.id)?.id ?? "")
+        : groupId,
+    );
     setChosen([]);
     if (connected) await driveFiles();
   }
@@ -328,8 +377,8 @@ export default function Library() {
     new Set(
       data.artworks
         .filter((a) => groupId === "all" || a.groupId === groupId)
-        .map((a) => a.collection)
-    )
+        .map((a) => a.collection),
+    ),
   );
   const visible = useMemo(
     () =>
@@ -341,16 +390,16 @@ export default function Library() {
             (collection === "all" || a.collection === collection) &&
             `${a.title} ${a.tags.join(" ")} ${a.collection}`
               .toLowerCase()
-              .includes(query.toLowerCase())
+              .includes(query.toLowerCase()),
         )
         .sort((a, b) =>
           sort === "name"
             ? a.title.localeCompare(b.title)
             : sort === "old"
-            ? a.createdAt.localeCompare(b.createdAt)
-            : b.createdAt.localeCompare(a.createdAt)
+              ? a.createdAt.localeCompare(b.createdAt)
+              : b.createdAt.localeCompare(a.createdAt),
         ),
-    [data.artworks, groupId, view, collection, query, sort]
+    [data.artworks, groupId, view, collection, query, sort],
   );
   const activeGroup = data.groups.find((g) => g.id === groupId);
   const selectedIndex = selected
@@ -359,7 +408,7 @@ export default function Library() {
   function navigateArtwork(direction: number) {
     if (selectedIndex < 0 || visible.length < 2) return;
     setSelected(
-      visible[(selectedIndex + direction + visible.length) % visible.length]
+      visible[(selectedIndex + direction + visible.length) % visible.length],
     );
     setError("");
   }
@@ -372,17 +421,93 @@ export default function Library() {
         void loadDrivePreview(previewPath(next, 1024)).catch(() => {});
     }
   }, [selectedIndex, visible]);
+  const ownedGroups =
+    mode === "demo"
+      ? data.groups
+      : data.groups.filter((g) => g.ownerId === user?.id);
+  const canEditSelected =
+    mode === "demo" ||
+    data.groups.find((g) => g.id === selected?.groupId)?.ownerId === user?.id;
   const chosenSet = new Set(chosen);
   const title =
     view === "favorites"
       ? "Favorites"
       : view === "collections"
-      ? "Collections"
-      : view === "recent"
-      ? "Recently added"
-      : activeGroup?.name ?? "All artworks";
+        ? "Collections"
+        : view === "recent"
+          ? "Recently added"
+          : (activeGroup?.name ?? "All artworks");
+  const loginHref = `${apiBase()}/api/auth/login${deviceCode ? `?device=${deviceCode}` : ""}`;
+  if (!authReady || (!user && !demoAllowed))
+    return (
+      <main className="auth-page">
+        <div className="auth-card">
+          <a className="auth-logo" href="/">
+            folio ✳
+          </a>
+          <h1>あなたの作品に、ひとつの居場所を。</h1>
+          <p>
+            Googleでログインして、自分だけのライブラリを始めましょう。Driveは本人だけが閲覧でき、選んだ作品をグループに共有できます。
+          </p>
+          {!authReady ? (
+            <p>接続を確認しています…</p>
+          ) : (
+            <a className="button primary full" href={loginHref}>
+              Googleでログイン
+            </a>
+          )}
+          {error && (
+            <p role="alert" className="error">
+              {error}
+            </p>
+          )}
+          {authReady && !deviceCode && (
+            <button
+              className="text-button"
+              onClick={() => {
+                setDemoAllowed(true);
+                setMode("demo");
+                setData(sampleData());
+              }}
+            >
+              サンプルを見る
+            </button>
+          )}
+        </div>
+      </main>
+    );
   return (
     <div className="app-shell">
+      {user && deviceCode && (
+        <section className="device-approval" aria-label="スマホ接続">
+          <h2>スマホを接続</h2>
+          <p>
+            {user.email}{" "}
+            としてスマホアプリにログインします。スマホに表示されたコードと一致する場合だけ許可してください。
+          </p>
+          <strong>{deviceCode}</strong>
+          <button
+            className="button primary"
+            disabled={deviceApproved}
+            onClick={async () => {
+              try {
+                await request("/auth/device/approve", {
+                  method: "POST",
+                  body: JSON.stringify({ userCode: deviceCode }),
+                });
+                setDeviceApproved(true);
+              } catch (e) {
+                notify((e as Error).message);
+              }
+            }}
+          >
+            {deviceApproved
+              ? "許可済み：スマホへ戻ってください"
+              : "このスマホへの接続を許可"}
+          </button>
+        </section>
+      )}
+
       <aside className={navOpen ? "sidebar open" : "sidebar"}>
         <a href="/" className="brand">
           folio<span>✳</span>
@@ -483,9 +608,7 @@ export default function Library() {
             <span className="avatar">S</span>
             <span>
               Studio workspace
-              <small>
-                {mode === "demo" ? "Demo workspace" : "Local workspace"}
-              </small>
+              <small>{mode === "demo" ? "Demo workspace" : user?.email}</small>
             </span>
             <Settings size={17} />
           </button>
@@ -511,8 +634,8 @@ export default function Library() {
               {mode === "loading"
                 ? "Loading…"
                 : mode === "demo"
-                ? "Demo mode"
-                : "API connected"}
+                  ? "Demo mode"
+                  : "API connected"}
             </span>
             <button
               className="icon"
@@ -661,10 +784,10 @@ export default function Library() {
           {mode === "demo" && (
             <div className="demo-note">
               <span>
-                サンプル作品で操作できます。変更はこのブラウザに保存されます。
+                サンプル作品で操作できます。実際のライブラリはGoogleログイン後に利用できます。
               </span>
               <button onClick={() => open("settings")}>
-                APIを接続 <ArrowUpRight size={12} />
+                Googleでログイン <ArrowUpRight size={12} />
               </button>
             </div>
           )}
@@ -761,7 +884,7 @@ export default function Library() {
                         className="group-dot"
                         style={{
                           background: data.groups.find(
-                            (g) => g.id === a.groupId
+                            (g) => g.id === a.groupId,
                           )?.color,
                         }}
                       />
@@ -871,10 +994,13 @@ export default function Library() {
                 <select
                   name="groupId"
                   defaultValue={
-                    groupId === "all" ? data.groups[0]?.id : groupId
+                    groupId === "all"
+                      ? (data.groups.find((g) => g.ownerId === user?.id)?.id ??
+                        "")
+                      : groupId
                   }
                 >
-                  {data.groups.map((g) => (
+                  {ownedGroups.map((g) => (
                     <option key={g.id} value={g.id}>
                       {g.name}
                     </option>
@@ -909,66 +1035,34 @@ export default function Library() {
       )}
       {modal === "settings" && (
         <Dialog title="Workspace settings" onClose={() => setModal(null)}>
-          <p className="dialog-intro">
-            Webとスマホを、同じBun / Hono APIに接続します。
+          <p className="dialog-intro">{user?.email ?? "デモモード"}</p>
+          <p className="field-note">
+            Driveの接続はあなた専用です。共有したグループの作品だけがメンバーに表示されます。
           </p>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const f = new FormData(e.currentTarget);
-              const endpoint = String(f.get("endpoint")).replace(/\/$/, "");
-              try {
-                if (endpoint) {
-                  const u = new URL(endpoint);
-                  if (!["http:", "https:"].includes(u.protocol)) throw Error();
+          {user && (
+            <button
+              className="button secondary full"
+              onClick={async () => {
+                try {
+                  await request("/session", { method: "DELETE" });
+                  setAuthToken("");
+                  clearDriveCaches();
+                  setData({ groups: [], artworks: [] });
+                  setUser(null);
+                  setConnected(false);
+                  setDemoAllowed(false);
+                  setModal(null);
+                  setMode("demo");
+                } catch (e) {
+                  setError((e as Error).message);
                 }
-              } catch {
-                setError("http:// または https:// のAPI URLを入力してください");
-                return;
-              }
-              localStorage.setItem("folio-api", endpoint);
-              setAuthToken(String(f.get("token")));
-              try {
-                await request("/session", { method: "POST" });
-              } catch (error) {
-                setError(
-                  error instanceof Error
-                    ? error.message
-                    : "接続できませんでした"
-                );
-                return;
-              }
-              setModal(null);
-              await load();
-              notify("接続設定を保存しました");
-            }}
-          >
-            <label>
-              API URL
-              <input
-                name="endpoint"
-                type="url"
-                placeholder="空欄なら同一オリジン"
-                defaultValue={apiBase()}
-              />
-            </label>
-            <label>
-              API token
-              <input
-                name="token"
-                type="password"
-                autoComplete="off"
-                defaultValue={getAuthToken()}
-              />
-            </label>
-            <p className="field-note">
-              ローカルではAPIを起動するだけで接続できます。リモート接続では、サーバーと同じAPI_TOKENを設定してください。
-            </p>
-            {error && <p className="error">{error}</p>}
-            <button type="submit" className="button primary full">
-              保存して再接続
+              }}
+            >
+              ログアウト
             </button>
-          </form>
+          )}
+          {error && <p className="error">{error}</p>}
+          {user && <GroupSharing groups={data.groups} userId={user.id} />}
           <div className="connection-info">
             <DriveIcon />
             <span>
@@ -977,8 +1071,8 @@ export default function Library() {
                 {connected
                   ? "接続済み"
                   : configured
-                  ? "接続できます"
-                  : "OAuth認証情報が未設定です"}
+                    ? "接続できます"
+                    : "OAuth認証情報が未設定です"}
               </strong>
             </span>
             {connected && (
@@ -1031,7 +1125,9 @@ export default function Library() {
               >
                 {busy ? "接続中…" : "Googleアカウントを接続"}
               </button>
-              <small>画像・フォルダの読み取り権限を使用します。</small>
+              <small>
+                接続したDriveはあなただけが閲覧できます。グループに取り込んだ作品だけが、そのグループのメンバーに共有されます。
+              </small>
             </div>
           ) : (
             <>
@@ -1049,7 +1145,7 @@ export default function Library() {
                     value={importGroup}
                     onChange={(e) => setImportGroup(e.target.value)}
                   >
-                    {data.groups.map((g) => (
+                    {ownedGroups.map((g) => (
                       <option value={g.id} key={g.id}>
                         {g.name}
                       </option>
@@ -1078,7 +1174,7 @@ export default function Library() {
                         : setChosen(
                             chosenSet.has(f.id)
                               ? chosen.filter((id) => id !== f.id)
-                              : [...chosen, f.id]
+                              : [...chosen, f.id],
                           )
                     }
                   >
@@ -1193,6 +1289,7 @@ export default function Library() {
                   タイトル
                   <input
                     name="title"
+                    readOnly={!canEditSelected}
                     defaultValue={selected.title}
                     required
                     maxLength={120}
@@ -1200,8 +1297,15 @@ export default function Library() {
                 </label>
                 <label>
                   グループ
-                  <select name="groupId" defaultValue={selected.groupId}>
-                    {data.groups.map((g) => (
+                  <select
+                    name="groupId"
+                    disabled={!canEditSelected}
+                    defaultValue={selected.groupId}
+                  >
+                    {(canEditSelected
+                      ? ownedGroups
+                      : data.groups.filter((g) => g.id === selected.groupId)
+                    ).map((g) => (
                       <option key={g.id} value={g.id}>
                         {g.name}
                       </option>
@@ -1212,6 +1316,7 @@ export default function Library() {
                   コレクション
                   <input
                     name="collection"
+                    readOnly={!canEditSelected}
                     defaultValue={selected.collection}
                     required
                     maxLength={120}
@@ -1222,6 +1327,7 @@ export default function Library() {
                   タグ（カンマ区切り）
                   <input
                     name="tags"
+                    readOnly={!canEditSelected}
                     defaultValue={selected.tags.join(", ")}
                     maxLength={500}
                   />
@@ -1233,9 +1339,13 @@ export default function Library() {
                 <button
                   type="submit"
                   className="button primary full"
-                  disabled={busy}
+                  disabled={busy || !canEditSelected}
                 >
-                  {busy ? "保存中…" : "変更を保存"}
+                  {!canEditSelected
+                    ? "共有作品（閲覧のみ）"
+                    : busy
+                      ? "保存中…"
+                      : "変更を保存"}
                 </button>
                 <button
                   type="button"
@@ -1267,10 +1377,11 @@ export default function Library() {
                   <button
                     type="button"
                     className="text-button danger"
+                    disabled={!canEditSelected}
                     onClick={async () => {
                       if (
                         !window.confirm(
-                          "この作品をライブラリから削除しますか？Driveの元ファイルは削除されません。"
+                          "この作品をライブラリから削除しますか？Driveの元ファイルは削除されません。",
                         )
                       )
                         return;
@@ -1282,7 +1393,7 @@ export default function Library() {
                         update({
                           ...data,
                           artworks: data.artworks.filter(
-                            (a) => a.id !== selected.id
+                            (a) => a.id !== selected.id,
                           ),
                         });
                         setSelected(null);

@@ -16,8 +16,8 @@ GCLOUD=(gcloud --project="$PROJECT_ID" --account="$GCLOUD_ACCOUNT")
   --service-account="folio-runtime@$PROJECT_ID.iam.gserviceaccount.com" \
   --port=8080 --cpu=1 --memory=512Mi --min-instances=0 --max-instances=3 \
   --concurrency=40 --timeout=120 \
-  --update-env-vars="NODE_ENV=production,HOST=0.0.0.0,TURSO_DATABASE_URL=$TURSO_DATABASE_URL" \
-  --update-secrets="TURSO_AUTH_TOKEN=folio-turso-auth-token:latest,API_TOKEN=folio-api-token:latest,TOKEN_ENCRYPTION_KEY=folio-token-encryption-key:latest" --quiet
+  --update-env-vars="NODE_ENV=production,HOST=0.0.0.0,TURSO_DATABASE_URL=$TURSO_DATABASE_URL,LEGACY_OWNER_EMAIL=${LEGACY_OWNER_EMAIL:-}" \
+  --update-secrets="TURSO_AUTH_TOKEN=folio-turso-auth-token:latest,TOKEN_ENCRYPTION_KEY=folio-token-encryption-key:latest" --remove-secrets="API_TOKEN" --quiet
 SERVICE_URL="$("${GCLOUD[@]}" run services describe "$SERVICE_NAME" --region="$REGION" --format='value(status.url)')"
 "${GCLOUD[@]}" run services update "$SERVICE_NAME" --region="$REGION" \
   --update-env-vars="WEB_ORIGIN=$SERVICE_URL,API_ORIGIN=$SERVICE_URL" --quiet

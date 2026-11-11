@@ -30,7 +30,7 @@ type Data = { artworks: Artwork[]; groups: Group[] };
 const initial = { artworks: initialArtworks, groups: initialGroups };
 export default function App() {
   const [data, setData] = useState<Data>(initial),
-    [api, setApi] = useState("http://localhost:3001"),
+    [api, setApi] = useState("https://folio-biti2v34ya-an.a.run.app"),
     [token, setToken] = useState(""),
     [ready, setReady] = useState(false),
     [mode, setMode] = useState("demo"),
@@ -38,7 +38,7 @@ export default function App() {
     [group, setGroup] = useState("all"),
     [tab, setTab] = useState("all"),
     [modal, setModal] = useState<"settings" | "group" | "add" | "drive" | null>(
-      null
+      null,
     ),
     [selected, setSelected] = useState<Artwork | null>(null),
     [title, setTitle] = useState(""),
@@ -89,14 +89,19 @@ export default function App() {
         "コピーできませんでした",
         error instanceof Error
           ? error.message
-          : "画像の接続状態を確認してください。"
+          : "画像の接続状態を確認してください。",
       );
     } finally {
       setCopyingId(null);
     }
   }
   const [draftApi, setDraftApi] = useState(api);
-  const [draftToken, setDraftToken] = useState(token);
+  const [userEmail, setUserEmail] = useState("");
+  const [deviceLogin, setDeviceLogin] = useState<{
+    deviceCode: string;
+    userCode: string;
+    verificationUri: string;
+  } | null>(null);
   async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const r = await fetch(`${api}/api${path}`, {
       ...init,
@@ -127,9 +132,17 @@ export default function App() {
   }, []);
   async function load() {
     try {
+      const me = await request<{ user: { email: string } | null }>("/auth/me");
+      if (!me.user) throw Error("ログインしてください");
+      setUserEmail(me.user.email);
       setData(await request<Data>("/library"));
       setMode("live");
     } catch {
+      setData(initial);
+      setSelected(null);
+      setFiles([]);
+      setChosen([]);
+      setUserEmail("");
       setMode("demo");
     }
   }
@@ -144,7 +157,6 @@ export default function App() {
   function open(m: typeof modal) {
     if (m === "settings") {
       setDraftApi(api);
-      setDraftToken(token);
     }
     if (m === "drive") setChosen([]);
     setModal(m);
@@ -229,17 +241,17 @@ export default function App() {
     setError("");
     try {
       const s = await request<{ connected: boolean; configured: boolean }>(
-        "/drive/status"
+        "/drive/status",
       );
       if (!s.connected)
         throw Error(
-          "WebからGoogle Driveを接続してから、この画面を再読み込みしてください。"
+          "WebからGoogle Driveを接続してから、この画面を再読み込みしてください。",
         );
       const r = await request<{ files: typeof files; nextPageToken?: string }>(
         `/drive/files?${new URLSearchParams({
           ...(folderId ? { folder: folderId } : {}),
           ...(page ? { pageToken: page } : {}),
-        })}`
+        })}`,
       );
       setFiles((prev) => (page ? [...prev, ...r.files] : r.files));
       setFolder(folderId);
@@ -256,7 +268,7 @@ export default function App() {
       (tab !== "favorites" || a.favorite) &&
       `${a.title} ${a.tags.join(" ")} ${a.collection}`
         .toLowerCase()
-        .includes(query.toLowerCase())
+        .includes(query.toLowerCase()),
   );
   const selectedIndex = selected
     ? artworks.findIndex((a) => a.id === selected.id)
@@ -274,9 +286,7 @@ export default function App() {
   const picture = (a: Artwork, size = 512) => ({
     uri:
       a.source === "drive"
-        ? `${api}/api/drive/thumbnail/${encodeURIComponent(
-            a.driveId ?? a.url.split("/").pop()!
-          )}?size=${size}`
+        ? `${api}/api/artworks/${encodeURIComponent(a.id)}/thumbnail?size=${size}`
         : a.url,
     headers:
       a.source === "drive" && token
@@ -482,12 +492,12 @@ export default function App() {
                 {selected
                   ? "Artwork details"
                   : modal === "settings"
-                  ? "Settings"
-                  : modal === "group"
-                  ? "グループを作成"
-                  : modal === "drive"
-                  ? "Google Drive"
-                  : "作品を追加"}
+                    ? "Settings"
+                    : modal === "group"
+                      ? "グループを作成"
+                      : modal === "drive"
+                        ? "Google Drive"
+                        : "作品を追加"}
               </Text>
               <Pressable
                 accessibilityLabel="閉じる"
@@ -513,40 +523,116 @@ export default function App() {
                   実機ではPCのLAN IPアドレスまたはHTTPSのAPI
                   URLを指定します。Androidエミュレーターは10.0.2.2を使用します。
                 </Text>
-                <Text style={s.label}>API token</Text>
-                <TextInput
-                  style={s.input}
-                  value={draftToken}
-                  onChangeText={setDraftToken}
-                  secureTextEntry
-                  autoCapitalize="none"
-                />
+                <Text style={s.help}>
+                  {userEmail ||
+                    "Googleアカウントでログインしてください。共通APIトークンは使用できません。"}
+                </Text>
                 <Pressable
                   style={s.primary}
+                  disabled={busy}
                   onPress={async () => {
+                    setBusy(true);
+                    setError("");
                     try {
                       const parsed = new URL(draftApi);
-                      if (!["http:", "https:"].includes(parsed.protocol))
-                        throw Error();
-                    } catch {
-                      setError("有効なAPI URLを入力してください");
-                      return;
+                      if (
+                        parsed.protocol !== "https:" &&
+                        !["localhost", "127.0.0.1", "10.0.2.2"].includes(
+                          parsed.hostname,
+                        )
+                      )
+                        throw Error("HTTPSのAPI URLを指定してください");
+                      const endpoint = parsed.origin;
+                      const r = await fetch(
+                        `${endpoint}/api/auth/device/start`,
+                        { method: "POST" },
+                      );
+                      if (!r.ok) throw Error("ログインを開始できませんでした");
+                      const login = await r.json();
+                      await SecureStore.deleteItemAsync("folio-token");
+                      await AsyncStorage.setItem("folio-api", endpoint);
+                      setToken("");
+                      setApi(endpoint);
+                      setData(initial);
+                      setSelected(null);
+                      setDeviceLogin(login);
+                      await Linking.openURL(login.verificationUri);
+                    } catch (e) {
+                      setError((e as Error).message);
+                    } finally {
+                      setBusy(false);
                     }
-                    const endpoint = draftApi.replace(/\/$/, "");
-                    await AsyncStorage.setItem("folio-api", endpoint);
-                    await SecureStore.setItemAsync("folio-token", draftToken);
-                    setApi(endpoint);
-                    setToken(draftToken);
-                    setModal(null);
                   }}
                 >
-                  <Text style={s.primaryText}>保存して接続</Text>
+                  <Text style={s.primaryText}>ブラウザでGoogleログイン</Text>
                 </Pressable>
+                {deviceLogin && (
+                  <>
+                    <Text style={s.help}>
+                      ブラウザに同じコードが表示されることを確認して、スマホへの接続を許可してください。
+                    </Text>
+                    <Text style={s.heading}>{deviceLogin.userCode}</Text>
+                    <Pressable
+                      style={s.primary}
+                      disabled={busy}
+                      onPress={async () => {
+                        setBusy(true);
+                        setError("");
+                        try {
+                          const result = await request<{ token: string }>(
+                            "/auth/device/token",
+                            {
+                              method: "POST",
+                              body: JSON.stringify({
+                                deviceCode: deviceLogin.deviceCode,
+                              }),
+                            },
+                          );
+                          await SecureStore.setItemAsync(
+                            "folio-token",
+                            result.token,
+                          );
+                          setToken(result.token);
+                          setDeviceLogin(null);
+                          setModal(null);
+                        } catch (e) {
+                          setError((e as Error).message);
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      <Text style={s.primaryText}>許可したので接続する</Text>
+                    </Pressable>
+                  </>
+                )}
+                {userEmail && (
+                  <Pressable
+                    style={s.primary}
+                    onPress={async () => {
+                      try {
+                        await request("/session", { method: "DELETE" });
+                        await SecureStore.deleteItemAsync("folio-token");
+                        setToken("");
+                        setUserEmail("");
+                        setData(initial);
+                        setFiles([]);
+                        setChosen([]);
+                        setSelected(null);
+                        setMode("demo");
+                      } catch (e) {
+                        setError((e as Error).message);
+                      }
+                    }}
+                  >
+                    <Text style={s.primaryText}>ログアウト</Text>
+                  </Pressable>
+                )}
               </>
             ) : modal === "drive" ? (
               <>
                 <Text style={s.help}>
-                  Web側で接続したDriveから画像を選べます。フォルダをタップすると中を表示します。
+                  同じGoogleアカウントでWeb側に接続した、自分専用のDriveから画像を選べます。共有グループに取り込むと、その作品だけがメンバーに表示されます。
                 </Text>
                 <GroupPicker
                   groups={data.groups}
@@ -566,7 +652,7 @@ export default function App() {
                         : setChosen(
                             chosen.includes(f.id)
                               ? chosen.filter((id) => id !== f.id)
-                              : [...chosen, f.id]
+                              : [...chosen, f.id],
                           )
                     }
                   >
@@ -700,7 +786,7 @@ export default function App() {
                       ? async () => {
                           if (!title.trim() || !collection.trim()) {
                             setError(
-                              "タイトルとコレクションを入力してください"
+                              "タイトルとコレクションを入力してください",
                             );
                             return;
                           }
@@ -723,12 +809,12 @@ export default function App() {
                                         groupId: target,
                                         collection,
                                       }),
-                                    }
+                                    },
                                   );
                             await update({
                               ...data,
                               artworks: data.artworks.map((x) =>
-                                x.id === a.id ? a : x
+                                x.id === a.id ? a : x,
                               ),
                             });
                             setSelected(null);
@@ -765,7 +851,7 @@ export default function App() {
                                 await update({
                                   ...data,
                                   artworks: data.artworks.filter(
-                                    (a) => a.id !== selected.id
+                                    (a) => a.id !== selected.id,
                                   ),
                                 });
                                 setSelected(null);
@@ -774,7 +860,7 @@ export default function App() {
                               }
                             },
                           },
-                        ]
+                        ],
                       )
                     }
                   >

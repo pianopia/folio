@@ -1,7 +1,12 @@
 @import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;450;500;550;600;650;700&family=Manrope:wght@400;500;600;650;700;750;800&display=swap");
 :root {
-  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
-    "Noto Sans", sans-serif;
+  font-family:
+    "DM Sans",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Helvetica Neue",
+    "Noto Sans",
+    sans-serif;
   color: #252a2b;
   background: #fafbf9;
   font-synthesis: none;
@@ -65,7 +70,10 @@ svg {
   flex-shrink: 0;
 }
 button {
-  transition: background 0.16s, transform 0.16s, color 0.16s;
+  transition:
+    background 0.16s,
+    transform 0.16s,
+    color 0.16s;
 }
 button:active {
   transform: translateY(1px);
@@ -397,7 +405,8 @@ main {
   position: absolute;
   inset: 0;
   transform: rotate(-18deg) scale(1.5);
-  background-image: linear-gradient(#b4bfaa22 1px, transparent 1px),
+  background-image:
+    linear-gradient(#b4bfaa22 1px, transparent 1px),
     linear-gradient(90deg, #b4bfaa22 1px, transparent 1px);
   background-size: 35px 35px;
   mask-image: linear-gradient(90deg, transparent, #000);
@@ -446,7 +455,9 @@ main {
     #284b6c 86%
   );
   border-radius: 50%;
-  box-shadow: 10px 12px 15px #45617420, inset -10px -9px 15px #33537455;
+  box-shadow:
+    10px 12px 15px #45617420,
+    inset -10px -9px 15px #33537455;
 }
 .scene-card {
   background: #f6a184;
@@ -1701,4 +1712,68 @@ main {
   font-size: 11px;
   line-height: 1.8;
   margin: 0 0 16px;
+}
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #edf1e7;
+  padding: 24px;
+}
+.auth-card {
+  max-width: 540px;
+  padding: 48px;
+  background: #fff;
+  border: 1px solid #dce5d2;
+  border-radius: 20px;
+}
+.auth-logo {
+  font-size: 48px;
+  letter-spacing: -3px;
+  color: #3b5832;
+  font-weight: 700;
+}
+.auth-card h1 {
+  font-size: 28px;
+  margin: 28px 0 18px;
+}
+.auth-card p {
+  line-height: 1.9;
+  color: #66775c;
+  margin-bottom: 24px;
+}
+.auth-card .text-button {
+  margin-top: 24px;
+}
+.device-approval {
+  position: fixed;
+  top: 15px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 550px;
+  width: 90%;
+  background: #fff;
+  border: 2px solid #688354;
+  border-radius: 12px;
+  padding: 24px;
+  z-index: 120;
+  box-shadow: 0 8px 40px #0003;
+}
+.device-approval strong {
+  display: block;
+  font-size: 24px;
+  letter-spacing: 3px;
+  margin: 16px 0;
+}
+.sharing-settings {
+  margin: 24px 0;
+  padding: 20px 0;
+  border-top: 1px solid #e0e7d8;
+}
+.sharing-settings li {
+  padding: 10px 0;
+}
+.sharing-settings .text-button {
+  margin-left: 12px;
 }

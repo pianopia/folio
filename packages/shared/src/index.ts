@@ -1,4 +1,9 @@
-export type Group = { id: string; name: string; color: string };
+export type Group = {
+  id: string;
+  name: string;
+  color: string;
+  ownerId?: string;
+};
 export type Artwork = {
   id: string;
   title: string;
@@ -10,6 +15,7 @@ export type Artwork = {
   createdAt: string;
   source: "sample" | "drive";
   driveId?: string;
+  ownerId?: string;
 };
 export const initialGroups: Group[] = [
   { id: "studio", name: "Design studio", color: "#9b9be8" },

@@ -1,10 +1,10 @@
-import type { Hono } from "hono";
+import type { Hono, Env } from "hono";
 import { resolve, sep, extname } from "node:path";
 import { stat } from "node:fs/promises";
 
 // Return Web Responses directly. This also keeps the bundled Bun runtime free
 // from adapter/function-name collisions in third-party static-file wrappers.
-export function serveWeb(app: Hono, directory = "./dist") {
+export function serveWeb<E extends Env>(app: Hono<E>, directory = "./dist") {
   const root = resolve(directory);
   const isFile = async (path: string) => {
     try {
@@ -38,8 +38,8 @@ export function serveWeb(app: Hono, directory = "./dist") {
         "Cache-Control": path.endsWith(`${sep}index.html`)
           ? "no-cache"
           : pathname.startsWith("/assets/")
-          ? "public, max-age=31536000, immutable"
-          : "public, max-age=3600",
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=3600",
         "X-Content-Type-Options": "nosniff",
       },
     });

@@ -8,5 +8,5 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["src", "app.test.ts"]
+  "include": ["src", "*.test.ts", "test-support.ts"]
 }

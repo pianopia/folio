@@ -13,9 +13,9 @@ A Google Drive connected artwork library for Web, iOS, and Android.
 
 ## Features
 
-Group and collection organization, search, favorites, artwork editing, Google Drive import, and one-click image copying. Drive browsing uses 512px thumbnails, 1024px detail previews, bounded caches, nearby-image preloading, and previous/next navigation. Copying fetches the original image and writes PNG data to the clipboard.
+Google account sign-in, private per-user Drive connections, explicit group sharing, group and collection organization, search, favorites, artwork editing, Google Drive import, and one-click image copying. Drive browsing uses 512px thumbnails, 1024px detail previews, bounded caches, nearby-image preloading, and previous/next navigation. Copying fetches the original image and writes PNG data to the clipboard.
 
-The current application is a single workspace. Groups organize artworks; they are not separate access-control boundaries. The API requires a workspace token when hosted remotely.
+Each Google account has its own library and Drive authorization. Groups form access-control boundaries; only owners can add or remove read-only members.
 
 ## Local development
 
@@ -29,13 +29,13 @@ bun run dev
 
 Web: `http://127.0.0.1:5173`. API: `http://127.0.0.1:3001/api/health`.
 
-Leave `TURSO_DATABASE_URL` empty to use a local SQLite file through libSQL. Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to use a dedicated Turso database. The application creates its tables and seeds the initial sample artwork exactly once, inside a transaction. Production requires Turso and never falls back to an ephemeral local database.
+Leave `TURSO_DATABASE_URL` empty to use a local SQLite file through libSQL. Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to use a dedicated Turso database. The application creates its tables automatically; new accounts receive a private empty group. Production requires Turso and never falls back to an ephemeral local database.
 
-The sample photos are loaded from Unsplash. When the API is unavailable or authentication has not been configured, the Web displays **Demo mode** and keeps demo edits in the browser. Those edits are not synchronized to the API.
+The sample photos are loaded from Unsplash. The sign-in screen offers an explicit sample-only **Demo mode** that keeps demo edits in the browser. Those edits are not synchronized to the API.
 
 ## Cloud Run
 
-The root Dockerfile builds the Remix SPA and bundles the Bun/Hono server. The runtime image contains the server, the static assets, and the libSQL runtime dependencies. Static files are public; library and Google Drive APIs require authentication.
+The root Dockerfile builds the Remix SPA and bundles the Bun/Hono server. The runtime image contains the server, the static assets, and the libSQL runtime dependencies. Static files are public; library and Google Drive APIs require a per-user Google-authenticated session. The former shared workspace API token no longer authenticates any endpoint.
 
 Production defaults:
 
@@ -47,20 +47,19 @@ Production defaults:
 
 Runtime configuration:
 
-| Variable                                    | Purpose                                                        |
-| ------------------------------------------- | -------------------------------------------------------------- |
-| `TURSO_DATABASE_URL`                        | Dedicated Turso database URL                                   |
-| `TURSO_AUTH_TOKEN`                          | Database-scoped token, injected from Secret Manager            |
-| `API_TOKEN`                                 | Workspace access token, injected from Secret Manager           |
-| `TOKEN_ENCRYPTION_KEY`                      | 64-character hexadecimal key for Google OAuth token encryption |
-| `WEB_ORIGIN`                                | Exact public Web origin for CORS and redirects                 |
-| `API_ORIGIN`                                | Public API origin for Google OAuth callbacks                   |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional until Google Drive OAuth is configured                |
+| Variable                                    | Purpose                                                           |
+| ------------------------------------------- | ----------------------------------------------------------------- |
+| `TURSO_DATABASE_URL`                        | Dedicated Turso database URL                                      |
+| `TURSO_AUTH_TOKEN`                          | Database-scoped token, injected from Secret Manager               |
+| `LEGACY_OWNER_EMAIL`                        | Explicit verified owner allowed to migrate the old workspace once |
+| `TOKEN_ENCRYPTION_KEY`                      | 64-character hexadecimal key for Google OAuth token encryption    |
+| `WEB_ORIGIN`                                | Exact public Web origin for CORS and redirects                    |
+| `API_ORIGIN`                                | Public API origin for Google OAuth callbacks                      |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional until Google Drive OAuth is configured                   |
 
-The runtime identity has access only to the application's five secrets:
+The runtime uses these application secrets:
 
 - `folio-turso-auth-token`
-- `folio-api-token`
 - `folio-token-encryption-key`
 - `folio-google-client-id`
 - `folio-google-client-secret`
@@ -76,11 +75,13 @@ TURSO_DATABASE_URL=libsql://YOUR-DEDICATED-DATABASE.turso.io \
 
 The script builds an image in Cloud Build, deploys it, and updates the Web/API origins using the actual Cloud Run service URL. Maximum instances default to 3; minimum instances to 0.
 
-To authenticate the Web, open Workspace settings, leave the API URL blank for the same origin, and enter the workspace API token. Saving establishes an HttpOnly session cookie so reloading keeps the connection. Retrieve the workspace token securely with an authorized GCP identity:
+Sign in with your Google account on the Web. Each login creates an opaque, random seven-day HttpOnly session; only its SHA-256 hash is stored in Turso. Logout revokes that session immediately. Shared `API_TOKEN` values and old workspace cookies are rejected.
 
-```sh
-gcloud secrets versions access latest --secret=folio-api-token --project=pianopia
-```
+The sign-in flow requests `openid email profile`. Drive connection is separate and also requests `drive.readonly`; the verified Google subject must match the signed-in user. OAuth uses one-time server-stored state, browser binding, nonce and PKCE. Google ID-token signatures, issuer, audience, expiry and verified email are validated with Google's public keys.
+
+Each account starts with a private group. In Settings, the owner can grant registered users read access to a specific group or remove that access. Members can view/copy only artworks explicitly placed in that group; they cannot browse the owner's Drive, edit artworks, move them to another group, or manage membership. Sharing includes future artworks added to the group. Media requests check current membership every time and send `Cache-Control: no-store`. An already viewed/downloaded image cannot be recalled from a recipient.
+
+Existing unscoped records and the old global Drive credential are quarantined. Only the explicitly configured `LEGACY_OWNER_EMAIL`, verified through Google login, can migrate them into that account. Migration runs once, transactionally; unrelated users never inherit the old workspace or Drive connection. Set this deployment variable only for the known original owner. API credentials and Drive caches are scoped by Google subject. No administrator/shared-token bypass exists.
 
 `GET /api/health` checks the database and reports `storage: "turso"`. An unauthenticated request to `/api/library` returns 401.
 
@@ -94,7 +95,7 @@ Enable the Google Drive API in a Google Cloud project, configure the consent scr
 https://YOUR-CLOUD-RUN-ORIGIN/api/drive/callback
 ```
 
-Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on Cloud Run (use Secret Manager for the secret). Then choose **Google Drive を接続** in the Web.
+Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on Cloud Run (use Secret Manager for the secret). Sign in, then choose **Google Drive を接続** in the Web.
 
 The application requests `drive.readonly`. It does not change or delete original Drive files. OAuth access/refresh tokens are encrypted with AES-256-GCM before being saved to Turso. The token-encryption key must remain stable across revisions. Disconnecting revokes Google's token and clears the preview caches.
 
@@ -110,9 +111,9 @@ bun run ios
 bun run android
 ```
 
-Open the project in Expo Go, then set the Cloud Run origin and workspace token in Settings. The token is stored in SecureStore. Local iOS simulators can use `http://localhost:3001`; Android emulators use `http://10.0.2.2:3001`. For physical devices on a LAN, start the API with `HOST=0.0.0.0` and `API_TOKEN` configured, then enter the computer's LAN address.
+Open the project in Expo Go, then choose **ブラウザでGoogleログイン** in Settings. Confirm the displayed device code in the signed-in Web app, approve that device, and return to the mobile app to finish. This exchanges a single-use device secret for a per-user session stored in SecureStore. It never uses the old workspace token. Local iOS simulators can use `http://localhost:3001`; Android emulators use `http://10.0.2.2:3001`. Use an HTTPS API origin with Google OAuth configured for physical devices.
 
-Google Drive is connected from the Web first. The mobile app then uses that same workspace connection. Store publication and signed app binaries are not included.
+Google Drive is connected from the Web first. The mobile app then uses the same signed-in user’s private connection. Store publication and signed app binaries are not included.
 
 ## Validation
 
@@ -124,23 +125,32 @@ cd apps/mobile
 bunx expo export --platform all --output-dir /tmp/folio-mobile-export
 ```
 
-The API tests exercise authentication, session cookies, validation, persistence, thumbnail request deduplication, concurrency limits, expiry recovery, and cache invalidation. Local tests use isolated in-memory libSQL databases. Real Google-account latency requires OAuth setup; the preview tests use a simulated Drive provider.
+The API tests exercise cross-user isolation, group membership and revocation, rejection of legacy shared tokens, session revocation, one-time legacy migration, single-use mobile grants, signed Google ID-token validation, OAuth state/nonce/PKCE, per-user thumbnail caching, persistence, concurrency limits, and expiry recovery. Local tests use isolated in-memory libSQL databases. Real Google-account latency depends on the connected Drive; the preview tests use a simulated Drive provider.
 
 ## API overview
 
-| Method         | Path                                | Purpose                                       |
-| -------------- | ----------------------------------- | --------------------------------------------- |
-| GET            | `/api/health`                       | Readiness/database check                      |
-| POST / DELETE  | `/api/session`                      | Establish/remove an authenticated Web session |
-| GET            | `/api/library`                      | Groups and artworks                           |
-| POST           | `/api/groups`                       | Create a group                                |
-| POST           | `/api/artworks`                     | Add an HTTPS image URL                        |
-| PATCH / DELETE | `/api/artworks/:id`                 | Edit/remove a library item                    |
-| GET            | `/api/drive/status`                 | Drive configuration/connection status         |
-| GET            | `/api/drive/connect`                | Start Google OAuth                            |
-| GET            | `/api/drive/callback`               | OAuth callback                                |
-| GET            | `/api/drive/files`                  | Paged image/folder list                       |
-| POST           | `/api/drive/import`                 | Import selected image references              |
-| GET            | `/api/drive/thumbnail/:id?size=512` | Cached preview (1024 also supported)          |
-| GET            | `/api/drive/image/:id`              | Original image for copying                    |
-| DELETE         | `/api/drive`                        | Disconnect Drive                              |
+| Method         | Path                                | Purpose                                  |
+| -------------- | ----------------------------------- | ---------------------------------------- |
+| GET            | `/api/health`                       | Readiness/database check                 |
+| GET            | `/api/auth/login`                   | Sign in with Google                      |
+| GET            | `/api/auth/me`                      | Current signed-in user                   |
+| DELETE         | `/api/session`                      | Revoke current session                   |
+| POST           | `/api/auth/device/start`            | Start mobile device sign-in              |
+| POST           | `/api/auth/device/approve`          | Approve a device as signed-in user       |
+| POST           | `/api/auth/device/token`            | Redeem the single-use device grant       |
+| GET / POST     | `/api/groups/:id/members`           | Owner lists/adds read-only group members |
+| DELETE         | `/api/groups/:id/members/:userId`   | Owner removes access                     |
+| GET            | `/api/artworks/:id/thumbnail`       | Preview after checking group access      |
+| GET            | `/api/artworks/:id/image`           | Original after checking group access     |
+| GET            | `/api/library`                      | Groups and artworks                      |
+| POST           | `/api/groups`                       | Create a group                           |
+| POST           | `/api/artworks`                     | Add an HTTPS image URL                   |
+| PATCH / DELETE | `/api/artworks/:id`                 | Edit/remove a library item               |
+| GET            | `/api/drive/status`                 | Drive configuration/connection status    |
+| GET            | `/api/drive/connect`                | Start Google OAuth                       |
+| GET            | `/api/drive/callback`               | OAuth callback                           |
+| GET            | `/api/drive/files`                  | Paged image/folder list                  |
+| POST           | `/api/drive/import`                 | Import selected image references         |
+| GET            | `/api/drive/thumbnail/:id?size=512` | Cached preview (1024 also supported)     |
+| GET            | `/api/drive/image/:id`              | Original image for copying               |
+| DELETE         | `/api/drive`                        | Disconnect Drive                         |
