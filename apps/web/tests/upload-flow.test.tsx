@@ -1,32 +1,10 @@
 import { test, expect, beforeEach, afterEach, afterAll } from "bun:test";
-import { Window } from "happy-dom";
 import React from "react";
 import UploadPanel from "../app/ui/UploadPanel";
-const dom = new Window({ url: "https://folio.example/" });
+import { render, fireEvent, screen, waitFor, cleanup } from "./dom";
 const originalFetch = globalThis.fetch;
 const originalCreate = URL.createObjectURL,
   originalRevoke = URL.revokeObjectURL;
-Object.assign(globalThis, {
-  window: dom,
-  document: dom.document,
-  navigator: dom.navigator,
-  localStorage: dom.localStorage,
-  HTMLElement: dom.HTMLElement,
-  HTMLDialogElement: dom.HTMLDialogElement,
-});
-Object.defineProperty(dom.HTMLDialogElement.prototype, "showModal", {
-  value() {
-    this.setAttribute("open", "");
-  },
-});
-Object.defineProperty(dom.HTMLDialogElement.prototype, "close", {
-  value() {
-    this.removeAttribute("open");
-  },
-});
-const { render, fireEvent, screen, waitFor, cleanup } = await import(
-  "@testing-library/react"
-);
 let uploaded: string[] = [],
   completed: string[] = [],
   failed = new Set<string>(),
@@ -107,7 +85,6 @@ afterAll(() => {
   globalThis.fetch = originalFetch;
   URL.createObjectURL = originalCreate;
   URL.revokeObjectURL = originalRevoke;
-  dom.happyDOM.abort();
 });
 
 test("select multiple images, inspect full preview, navigate, remove one and upload the remaining images with one action", async () => {

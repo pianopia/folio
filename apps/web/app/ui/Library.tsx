@@ -27,6 +27,7 @@ import {
   Copy,
   LoaderCircle,
 } from "lucide-react";
+import ArtworkViewer from "./ArtworkViewer";
 import UploadPanel from "./UploadPanel";
 import GroupSharing from "./GroupSharing";
 import type { Artwork } from "@folio/shared";
@@ -1246,198 +1247,136 @@ export default function Library() {
         </Dialog>
       )}
       {selected && (
-        <Dialog
-          title="Artwork details"
+        <ArtworkViewer
+          art={selected}
+          index={selectedIndex}
+          count={visible.length}
+          onNavigate={navigateArtwork}
           onClose={() => setSelected(null)}
-          wide
-          onKeyDown={(event) => {
-            if ((event.target as HTMLElement).closest("input,select,textarea"))
-              return;
-            if (event.key === "ArrowRight") {
-              event.preventDefault();
-              navigateArtwork(1);
-            }
-            if (event.key === "ArrowLeft") {
-              event.preventDefault();
-              navigateArtwork(-1);
-            }
-          }}
+          onCopy={() => copyImage(selected)}
+          copying={copyingId !== null}
+          feedback={toast}
         >
-          <div className="detail-browse">
-            <div className="browse-toolbar">
-              <span>
-                {selectedIndex + 1} / {visible.length}
-              </span>
-              <div>
-                <button
-                  type="button"
-                  className="button secondary"
-                  aria-label="前の作品"
-                  onClick={() => navigateArtwork(-1)}
-                  disabled={visible.length < 2}
-                >
-                  <ChevronLeft size={17} />
-                </button>
-                <button
-                  type="button"
-                  className="button secondary"
-                  aria-label="次の作品"
-                  onClick={() => navigateArtwork(1)}
-                  disabled={visible.length < 2}
-                >
-                  <ChevronRight size={17} />
-                </button>
-              </div>
-            </div>
-            {toast && (
-              <p role="status" className="detail-feedback">
-                {toast}
-              </p>
-            )}
-            <div className="detail-layout">
-              <div className="detail-image">
-                <ArtImage
-                  key={selected.id}
-                  art={selected}
-                  alt={selected.title}
-                  size={1024}
-                  eager
+          <form key={selected.id} onSubmit={(e) => submit(e, "edit")}>
+            <span className="eyebrow">
+              {selected.source === "drive"
+                ? "FROM GOOGLE DRIVE"
+                : selected.source === "storage"
+                  ? "FOLIO CLOUD STORAGE"
+                  : "YOUR INSPIRATION"}
+            </span>
+            <label>
+              タイトル
+              <input
+                name="title"
+                readOnly={!canEditSelected}
+                defaultValue={selected.title}
+                required
+                maxLength={120}
+              />
+            </label>
+            <label>
+              グループ
+              <select
+                name="groupId"
+                disabled={!canEditSelected}
+                defaultValue={selected.groupId}
+              >
+                {(canEditSelected
+                  ? ownedGroups
+                  : data.groups.filter((g) => g.id === selected.groupId)
+                ).map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              コレクション
+              <input
+                name="collection"
+                readOnly={!canEditSelected}
+                defaultValue={selected.collection}
+                required
+                maxLength={120}
+                list="collections"
+              />
+            </label>
+            <label>
+              タグ（カンマ区切り）
+              <input
+                name="tags"
+                readOnly={!canEditSelected}
+                defaultValue={selected.tags.join(", ")}
+                maxLength={500}
+              />
+            </label>
+            <p className="field-note">
+              追加日：
+              {new Date(selected.createdAt).toLocaleDateString("ja-JP")}
+            </p>
+            <button
+              type="submit"
+              className="button primary full"
+              disabled={busy || !canEditSelected}
+            >
+              {!canEditSelected
+                ? "共有作品（閲覧のみ）"
+                : busy
+                  ? "保存中…"
+                  : "変更を保存"}
+            </button>
+
+            <div className="detail-actions">
+              <button
+                type="button"
+                className="text-button"
+                onClick={() =>
+                  change(selected, { favorite: !selected.favorite })
+                }
+              >
+                <Heart
+                  size={15}
+                  fill={selected.favorite ? "currentColor" : "none"}
                 />
-              </div>
-              <form key={selected.id} onSubmit={(e) => submit(e, "edit")}>
-                <span className="eyebrow">
-                  {selected.source === "drive"
-                    ? "FROM GOOGLE DRIVE"
-                    : selected.source === "storage"
-                      ? "FOLIO CLOUD STORAGE"
-                      : "YOUR INSPIRATION"}
-                </span>
-                <label>
-                  タイトル
-                  <input
-                    name="title"
-                    readOnly={!canEditSelected}
-                    defaultValue={selected.title}
-                    required
-                    maxLength={120}
-                  />
-                </label>
-                <label>
-                  グループ
-                  <select
-                    name="groupId"
-                    disabled={!canEditSelected}
-                    defaultValue={selected.groupId}
-                  >
-                    {(canEditSelected
-                      ? ownedGroups
-                      : data.groups.filter((g) => g.id === selected.groupId)
-                    ).map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  コレクション
-                  <input
-                    name="collection"
-                    readOnly={!canEditSelected}
-                    defaultValue={selected.collection}
-                    required
-                    maxLength={120}
-                    list="collections"
-                  />
-                </label>
-                <label>
-                  タグ（カンマ区切り）
-                  <input
-                    name="tags"
-                    readOnly={!canEditSelected}
-                    defaultValue={selected.tags.join(", ")}
-                    maxLength={500}
-                  />
-                </label>
-                <p className="field-note">
-                  追加日：
-                  {new Date(selected.createdAt).toLocaleDateString("ja-JP")}
-                </p>
-                <button
-                  type="submit"
-                  className="button primary full"
-                  disabled={busy || !canEditSelected}
-                >
-                  {!canEditSelected
-                    ? "共有作品（閲覧のみ）"
-                    : busy
-                      ? "保存中…"
-                      : "変更を保存"}
-                </button>
-                <button
-                  type="button"
-                  className="button secondary full"
-                  disabled={copyingId !== null}
-                  onClick={() => copyImage(selected)}
-                >
-                  {copyingId === selected.id ? (
-                    <LoaderCircle size={15} className="copy-spinner" />
-                  ) : (
-                    <Copy size={15} />
-                  )}
-                  {copyingId === selected.id ? "コピー中…" : "画像をコピー"}
-                </button>
-                <div className="detail-actions">
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={() =>
-                      change(selected, { favorite: !selected.favorite })
-                    }
-                  >
-                    <Heart
-                      size={15}
-                      fill={selected.favorite ? "currentColor" : "none"}
-                    />
-                    お気に入り
-                  </button>
-                  <button
-                    type="button"
-                    className="text-button danger"
-                    disabled={!canEditSelected}
-                    onClick={async () => {
-                      if (
-                        !window.confirm(
-                          "この作品をライブラリから削除しますか？Driveの元ファイルは削除されません。",
-                        )
-                      )
-                        return;
-                      try {
-                        if (mode === "live")
-                          await request(`/artworks/${selected.id}`, {
-                            method: "DELETE",
-                          });
-                        update({
-                          ...data,
-                          artworks: data.artworks.filter(
-                            (a) => a.id !== selected.id,
-                          ),
-                        });
-                        setSelected(null);
-                        notify("ライブラリから削除しました");
-                      } catch (e) {
-                        notify((e as Error).message);
-                      }
-                    }}
-                  >
-                    <Trash2 size={15} />
-                    削除
-                  </button>
-                </div>
-              </form>
+                お気に入り
+              </button>
+              <button
+                type="button"
+                className="text-button danger"
+                disabled={!canEditSelected}
+                onClick={async () => {
+                  if (
+                    !window.confirm(
+                      "この作品をライブラリから削除しますか？Driveの元ファイルは削除されません。",
+                    )
+                  )
+                    return;
+                  try {
+                    if (mode === "live")
+                      await request(`/artworks/${selected.id}`, {
+                        method: "DELETE",
+                      });
+                    update({
+                      ...data,
+                      artworks: data.artworks.filter(
+                        (a) => a.id !== selected.id,
+                      ),
+                    });
+                    setSelected(null);
+                    notify("ライブラリから削除しました");
+                  } catch (e) {
+                    notify((e as Error).message);
+                  }
+                }}
+              >
+                <Trash2 size={15} />
+                削除
+              </button>
             </div>
-          </div>
-        </Dialog>
+          </form>
+        </ArtworkViewer>
       )}
       <datalist id="collections">
         {collections.map((c) => (

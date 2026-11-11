@@ -165,3 +165,5 @@ The API tests exercise cross-user isolation, group membership and revocation, re
 | GET            | `/api/drive/thumbnail/:id?size=512` | Cached preview (1024 also supported)     |
 | GET            | `/api/drive/image/:id`              | Original image for copying               |
 | DELETE         | `/api/drive`                        | Disconnect Drive                         |
+
+作品を開くと全画面ビューで表示します。詳細は右上の情報アイコンから半透明のパネルで開き、左右の矢印（Webでは矢印キーも利用可能）で作品を切り替えられます。画像コピーは詳細を開かずに実行できます。

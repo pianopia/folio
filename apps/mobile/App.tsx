@@ -15,6 +15,7 @@ import {
   ActivityIndicator,
   Linking,
 } from "react-native";
+import ArtworkViewer from "./ArtworkViewer";
 import UploadImages from "./UploadImages";
 import * as SecureStore from "expo-secure-store";
 import * as Crypto from "expo-crypto";
@@ -305,6 +306,386 @@ export default function App() {
         ? { Authorization: `Bearer ${token}` }
         : undefined,
   });
+  const canEditSelected =
+    !selected ||
+    mode === "demo" ||
+    data.groups.find((g) => g.id === selected.groupId)?.ownerId === userId;
+  const modalContent = (
+    <SafeAreaView style={[s.safe, selected && s.viewerInfoSafe]}>
+      <ScrollView
+        contentContainerStyle={[s.modal, selected && s.viewerInfoContent]}
+      >
+        {!selected && (
+          <View style={s.titleRow}>
+            <Text style={s.heading}>
+              {selected
+                ? "Artwork details"
+                : modal === "settings"
+                  ? "Settings"
+                  : modal === "group"
+                    ? "グループを作成"
+                    : modal === "drive"
+                      ? "Google Drive"
+                      : "作品を追加"}
+            </Text>
+            <Pressable
+              accessibilityLabel="閉じる"
+              onPress={() => {
+                setModal(null);
+                setSelected(null);
+              }}
+            >
+              <Text style={s.close}>×</Text>
+            </Pressable>
+          </View>
+        )}
+        {modal === "settings" ? (
+          <>
+            <Text style={[s.label, selected && s.viewerInfoMuted]}>
+              API URL
+            </Text>
+            <TextInput
+              style={[s.input, selected && s.viewerInfoInput]}
+              value={draftApi}
+              onChangeText={setDraftApi}
+              autoCapitalize="none"
+              keyboardType="url"
+            />
+            <Text style={s.help}>
+              実機ではPCのLAN IPアドレスまたはHTTPSのAPI
+              URLを指定します。Androidエミュレーターは10.0.2.2を使用します。
+            </Text>
+            <Text style={s.help}>
+              {userEmail ||
+                "Googleアカウントでログインしてください。共通APIトークンは使用できません。"}
+            </Text>
+            <Pressable
+              style={[s.primary, selected && s.viewerInfoPrimary]}
+              disabled={busy}
+              onPress={async () => {
+                setBusy(true);
+                setError("");
+                try {
+                  const parsed = new URL(draftApi);
+                  if (
+                    parsed.protocol !== "https:" &&
+                    !["localhost", "127.0.0.1", "10.0.2.2"].includes(
+                      parsed.hostname,
+                    )
+                  )
+                    throw Error("HTTPSのAPI URLを指定してください");
+                  const endpoint = parsed.origin;
+                  const r = await fetch(`${endpoint}/api/auth/device/start`, {
+                    method: "POST",
+                  });
+                  if (!r.ok) throw Error("ログインを開始できませんでした");
+                  const login = await r.json();
+                  await SecureStore.deleteItemAsync("folio-token");
+                  await AsyncStorage.setItem("folio-api", endpoint);
+                  setToken("");
+                  setApi(endpoint);
+                  setData(initial);
+                  setSelected(null);
+                  setDeviceLogin(login);
+                  await Linking.openURL(login.verificationUri);
+                } catch (e) {
+                  setError((e as Error).message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <Text style={s.primaryText}>ブラウザでGoogleログイン</Text>
+            </Pressable>
+            {deviceLogin && (
+              <>
+                <Text style={s.help}>
+                  ブラウザに同じコードが表示されることを確認して、スマホへの接続を許可してください。
+                </Text>
+                <Text style={s.heading}>{deviceLogin.userCode}</Text>
+                <Pressable
+                  style={[s.primary, selected && s.viewerInfoPrimary]}
+                  disabled={busy}
+                  onPress={async () => {
+                    setBusy(true);
+                    setError("");
+                    try {
+                      const result = await request<{ token: string }>(
+                        "/auth/device/token",
+                        {
+                          method: "POST",
+                          body: JSON.stringify({
+                            deviceCode: deviceLogin.deviceCode,
+                          }),
+                        },
+                      );
+                      await SecureStore.setItemAsync(
+                        "folio-token",
+                        result.token,
+                      );
+                      setToken(result.token);
+                      setDeviceLogin(null);
+                      setModal(null);
+                    } catch (e) {
+                      setError((e as Error).message);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <Text style={s.primaryText}>許可したので接続する</Text>
+                </Pressable>
+              </>
+            )}
+            {userEmail && (
+              <Pressable
+                style={[s.primary, selected && s.viewerInfoPrimary]}
+                onPress={async () => {
+                  try {
+                    await request("/session", { method: "DELETE" });
+                    await SecureStore.deleteItemAsync("folio-token");
+                    setToken("");
+                    setUserEmail("");
+                    setData(initial);
+                    setFiles([]);
+                    setChosen([]);
+                    setSelected(null);
+                    setMode("demo");
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+              >
+                <Text style={s.primaryText}>ログアウト</Text>
+              </Pressable>
+            )}
+          </>
+        ) : modal === "drive" ? (
+          <>
+            <Text style={s.help}>
+              同じGoogleアカウントでWeb側に接続した、自分専用のDriveから画像を選べます。共有グループに取り込むと、その作品だけがメンバーに表示されます。
+            </Text>
+            <GroupPicker
+              groups={data.groups}
+              value={target}
+              onChange={setTarget}
+            />
+            <Pressable onPress={() => drive()}>
+              <Text style={s.link}>← すべてのファイル・再読み込み</Text>
+            </Pressable>
+            {files.map((f) => (
+              <Pressable
+                key={f.id}
+                style={s.file}
+                onPress={() =>
+                  f.mimeType.endsWith("folder")
+                    ? drive(f.id)
+                    : setChosen(
+                        chosen.includes(f.id)
+                          ? chosen.filter((id) => id !== f.id)
+                          : [...chosen, f.id],
+                      )
+                }
+              >
+                <Text>
+                  {f.mimeType.endsWith("folder") ? "▱" : "▧"} {f.name}
+                </Text>
+                <Text>{chosen.includes(f.id) ? "✓" : ""}</Text>
+              </Pressable>
+            ))}
+            {nextPage && (
+              <Pressable onPress={() => drive(folder, nextPage)}>
+                <Text style={s.link}>さらに読み込む</Text>
+              </Pressable>
+            )}
+            <Pressable
+              disabled={busy || !chosen.length}
+              style={[s.primary, (!chosen.length || busy) && s.disabled]}
+              onPress={async () => {
+                setBusy(true);
+                try {
+                  await request("/drive/import", {
+                    method: "POST",
+                    body: JSON.stringify({ ids: chosen, groupId: target }),
+                  });
+                  await load();
+                  setChosen([]);
+                  setModal(null);
+                } catch (e) {
+                  setError((e as Error).message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              <Text style={s.primaryText}>{chosen.length}点を取り込む</Text>
+            </Pressable>
+          </>
+        ) : (
+          <>
+            {modal === "add" && mode === "live" && (
+              <UploadImages
+                api={api}
+                token={token}
+                groups={data.groups.filter((g) => g.ownerId === userId)}
+                onUploaded={(art) =>
+                  setData((d) => ({
+                    ...d,
+                    artworks: [
+                      art,
+                      ...d.artworks.filter((a) => a.id !== art.id),
+                    ],
+                  }))
+                }
+              />
+            )}
+            <Text style={[s.label, selected && s.viewerInfoMuted]}>
+              {modal === "group" ? "グループ名" : "タイトル"}
+            </Text>
+            <TextInput
+              style={[s.input, selected && s.viewerInfoInput]}
+              editable={!selected || canEditSelected}
+              value={title}
+              onChangeText={setTitle}
+              maxLength={120}
+            />
+            {modal !== "group" && (
+              <>
+                <Text style={[s.label, selected && s.viewerInfoMuted]}>
+                  グループ
+                </Text>
+                <GroupPicker
+                  dark={!!selected}
+                  groups={data.groups}
+                  value={target}
+                  onChange={setTarget}
+                />
+                <Text style={[s.label, selected && s.viewerInfoMuted]}>
+                  コレクション
+                </Text>
+                <TextInput
+                  style={[s.input, selected && s.viewerInfoInput]}
+                  editable={!selected || canEditSelected}
+                  value={collection}
+                  onChangeText={setCollection}
+                  maxLength={120}
+                />
+                {!selected && (
+                  <>
+                    <Text style={[s.label, selected && s.viewerInfoMuted]}>
+                      画像URL（HTTPS）
+                    </Text>
+                    <TextInput
+                      style={[s.input, selected && s.viewerInfoInput]}
+                      value={url}
+                      onChangeText={setUrl}
+                      autoCapitalize="none"
+                      keyboardType="url"
+                    />
+                  </>
+                )}
+              </>
+            )}
+            <Pressable
+              disabled={busy || (!!selected && !canEditSelected)}
+              style={[s.primary, selected && s.viewerInfoPrimary]}
+              onPress={
+                selected
+                  ? async () => {
+                      if (!title.trim() || !collection.trim()) {
+                        setError("タイトルとコレクションを入力してください");
+                        return;
+                      }
+                      setBusy(true);
+                      try {
+                        const a =
+                          mode === "demo"
+                            ? {
+                                ...selected,
+                                title,
+                                groupId: target,
+                                collection,
+                              }
+                            : await request<Artwork>(
+                                `/artworks/${selected.id}`,
+                                {
+                                  method: "PATCH",
+                                  body: JSON.stringify({
+                                    title,
+                                    groupId: target,
+                                    collection,
+                                  }),
+                                },
+                              );
+                        await update({
+                          ...data,
+                          artworks: data.artworks.map((x) =>
+                            x.id === a.id ? a : x,
+                          ),
+                        });
+                        setSelected(null);
+                      } catch (e) {
+                        setError((e as Error).message);
+                      } finally {
+                        setBusy(false);
+                      }
+                    }
+                  : save
+              }
+            >
+              <Text style={s.primaryText}>{busy ? "保存中…" : "保存する"}</Text>
+            </Pressable>
+            {selected && (
+              <Pressable
+                onPress={() =>
+                  Alert.alert(
+                    "作品を削除",
+                    "Driveの元ファイルは削除されません。",
+                    [
+                      { text: "キャンセル", style: "cancel" },
+                      {
+                        text: "削除",
+                        style: "destructive",
+                        onPress: async () => {
+                          try {
+                            if (mode === "live")
+                              await request(`/artworks/${selected.id}`, {
+                                method: "DELETE",
+                              });
+                            await update({
+                              ...data,
+                              artworks: data.artworks.filter(
+                                (a) => a.id !== selected.id,
+                              ),
+                            });
+                            setSelected(null);
+                          } catch (e) {
+                            setError((e as Error).message);
+                          }
+                        },
+                      },
+                    ],
+                  )
+                }
+              >
+                <Text style={[s.delete, selected && s.viewerInfoDelete]}>
+                  ライブラリから削除
+                </Text>
+              </Pressable>
+            )}
+          </>
+        )}
+        {busy && (
+          <ActivityIndicator color="#466042" style={{ marginTop: 16 }} />
+        )}
+        {!!error && (
+          <Text accessibilityRole="alert" style={s.error}>
+            {error}
+          </Text>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="dark-content" />
@@ -492,423 +873,31 @@ export default function App() {
       </View>
       <Modal
         visible={!!modal || !!selected}
-        animationType="slide"
-        presentationStyle="pageSheet"
+        animationType={selected ? "fade" : "slide"}
+        presentationStyle={selected ? "fullScreen" : "pageSheet"}
         onRequestClose={() => {
           setModal(null);
           setSelected(null);
         }}
       >
-        <SafeAreaView style={s.safe}>
-          <ScrollView contentContainerStyle={s.modal}>
-            <View style={s.titleRow}>
-              <Text style={s.heading}>
-                {selected
-                  ? "Artwork details"
-                  : modal === "settings"
-                    ? "Settings"
-                    : modal === "group"
-                      ? "グループを作成"
-                      : modal === "drive"
-                        ? "Google Drive"
-                        : "作品を追加"}
-              </Text>
-              <Pressable
-                accessibilityLabel="閉じる"
-                onPress={() => {
-                  setModal(null);
-                  setSelected(null);
-                }}
-              >
-                <Text style={s.close}>×</Text>
-              </Pressable>
-            </View>
-            {modal === "settings" ? (
-              <>
-                <Text style={s.label}>API URL</Text>
-                <TextInput
-                  style={s.input}
-                  value={draftApi}
-                  onChangeText={setDraftApi}
-                  autoCapitalize="none"
-                  keyboardType="url"
-                />
-                <Text style={s.help}>
-                  実機ではPCのLAN IPアドレスまたはHTTPSのAPI
-                  URLを指定します。Androidエミュレーターは10.0.2.2を使用します。
-                </Text>
-                <Text style={s.help}>
-                  {userEmail ||
-                    "Googleアカウントでログインしてください。共通APIトークンは使用できません。"}
-                </Text>
-                <Pressable
-                  style={s.primary}
-                  disabled={busy}
-                  onPress={async () => {
-                    setBusy(true);
-                    setError("");
-                    try {
-                      const parsed = new URL(draftApi);
-                      if (
-                        parsed.protocol !== "https:" &&
-                        !["localhost", "127.0.0.1", "10.0.2.2"].includes(
-                          parsed.hostname,
-                        )
-                      )
-                        throw Error("HTTPSのAPI URLを指定してください");
-                      const endpoint = parsed.origin;
-                      const r = await fetch(
-                        `${endpoint}/api/auth/device/start`,
-                        { method: "POST" },
-                      );
-                      if (!r.ok) throw Error("ログインを開始できませんでした");
-                      const login = await r.json();
-                      await SecureStore.deleteItemAsync("folio-token");
-                      await AsyncStorage.setItem("folio-api", endpoint);
-                      setToken("");
-                      setApi(endpoint);
-                      setData(initial);
-                      setSelected(null);
-                      setDeviceLogin(login);
-                      await Linking.openURL(login.verificationUri);
-                    } catch (e) {
-                      setError((e as Error).message);
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  <Text style={s.primaryText}>ブラウザでGoogleログイン</Text>
-                </Pressable>
-                {deviceLogin && (
-                  <>
-                    <Text style={s.help}>
-                      ブラウザに同じコードが表示されることを確認して、スマホへの接続を許可してください。
-                    </Text>
-                    <Text style={s.heading}>{deviceLogin.userCode}</Text>
-                    <Pressable
-                      style={s.primary}
-                      disabled={busy}
-                      onPress={async () => {
-                        setBusy(true);
-                        setError("");
-                        try {
-                          const result = await request<{ token: string }>(
-                            "/auth/device/token",
-                            {
-                              method: "POST",
-                              body: JSON.stringify({
-                                deviceCode: deviceLogin.deviceCode,
-                              }),
-                            },
-                          );
-                          await SecureStore.setItemAsync(
-                            "folio-token",
-                            result.token,
-                          );
-                          setToken(result.token);
-                          setDeviceLogin(null);
-                          setModal(null);
-                        } catch (e) {
-                          setError((e as Error).message);
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      <Text style={s.primaryText}>許可したので接続する</Text>
-                    </Pressable>
-                  </>
-                )}
-                {userEmail && (
-                  <Pressable
-                    style={s.primary}
-                    onPress={async () => {
-                      try {
-                        await request("/session", { method: "DELETE" });
-                        await SecureStore.deleteItemAsync("folio-token");
-                        setToken("");
-                        setUserEmail("");
-                        setData(initial);
-                        setFiles([]);
-                        setChosen([]);
-                        setSelected(null);
-                        setMode("demo");
-                      } catch (e) {
-                        setError((e as Error).message);
-                      }
-                    }}
-                  >
-                    <Text style={s.primaryText}>ログアウト</Text>
-                  </Pressable>
-                )}
-              </>
-            ) : modal === "drive" ? (
-              <>
-                <Text style={s.help}>
-                  同じGoogleアカウントでWeb側に接続した、自分専用のDriveから画像を選べます。共有グループに取り込むと、その作品だけがメンバーに表示されます。
-                </Text>
-                <GroupPicker
-                  groups={data.groups}
-                  value={target}
-                  onChange={setTarget}
-                />
-                <Pressable onPress={() => drive()}>
-                  <Text style={s.link}>← すべてのファイル・再読み込み</Text>
-                </Pressable>
-                {files.map((f) => (
-                  <Pressable
-                    key={f.id}
-                    style={s.file}
-                    onPress={() =>
-                      f.mimeType.endsWith("folder")
-                        ? drive(f.id)
-                        : setChosen(
-                            chosen.includes(f.id)
-                              ? chosen.filter((id) => id !== f.id)
-                              : [...chosen, f.id],
-                          )
-                    }
-                  >
-                    <Text>
-                      {f.mimeType.endsWith("folder") ? "▱" : "▧"} {f.name}
-                    </Text>
-                    <Text>{chosen.includes(f.id) ? "✓" : ""}</Text>
-                  </Pressable>
-                ))}
-                {nextPage && (
-                  <Pressable onPress={() => drive(folder, nextPage)}>
-                    <Text style={s.link}>さらに読み込む</Text>
-                  </Pressable>
-                )}
-                <Pressable
-                  disabled={busy || !chosen.length}
-                  style={[s.primary, (!chosen.length || busy) && s.disabled]}
-                  onPress={async () => {
-                    setBusy(true);
-                    try {
-                      await request("/drive/import", {
-                        method: "POST",
-                        body: JSON.stringify({ ids: chosen, groupId: target }),
-                      });
-                      await load();
-                      setChosen([]);
-                      setModal(null);
-                    } catch (e) {
-                      setError((e as Error).message);
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  <Text style={s.primaryText}>{chosen.length}点を取り込む</Text>
-                </Pressable>
-              </>
-            ) : (
-              <>
-                {selected && (
-                  <View>
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        marginBottom: 12,
-                      }}
-                    >
-                      <Pressable
-                        accessibilityLabel="前の作品"
-                        disabled={artworks.length < 2}
-                        onPress={() => navigateArtwork(-1)}
-                        hitSlop={12}
-                      >
-                        <Text style={s.link}>← 前の作品</Text>
-                      </Pressable>
-                      <Text style={s.help}>
-                        {selectedIndex + 1} / {artworks.length}
-                      </Text>
-                      <Pressable
-                        accessibilityLabel="次の作品"
-                        disabled={artworks.length < 2}
-                        onPress={() => navigateArtwork(1)}
-                        hitSlop={12}
-                      >
-                        <Text style={s.link}>次の作品 →</Text>
-                      </Pressable>
-                    </View>
-                    <Image
-                      key={selected.id}
-                      source={picture(selected, 1024)}
-                      style={s.detailImage}
-                    />
-                    <Pressable
-                      style={s.primary}
-                      disabled={copyingId !== null}
-                      onPress={() => copyImage(selected)}
-                    >
-                      <Text style={s.primaryText}>
-                        {copyingId === selected.id
-                          ? "コピー中…"
-                          : "⧉ 画像をコピー"}
-                      </Text>
-                    </Pressable>
-                  </View>
-                )}
-                {modal === "add" && mode === "live" && (
-                  <UploadImages
-                    api={api}
-                    token={token}
-                    groups={data.groups.filter((g) => g.ownerId === userId)}
-                    onUploaded={(art) =>
-                      setData((d) => ({
-                        ...d,
-                        artworks: [
-                          art,
-                          ...d.artworks.filter((a) => a.id !== art.id),
-                        ],
-                      }))
-                    }
-                  />
-                )}
-                <Text style={s.label}>
-                  {modal === "group" ? "グループ名" : "タイトル"}
-                </Text>
-                <TextInput
-                  style={s.input}
-                  value={title}
-                  onChangeText={setTitle}
-                  maxLength={120}
-                />
-                {modal !== "group" && (
-                  <>
-                    <Text style={s.label}>グループ</Text>
-                    <GroupPicker
-                      groups={data.groups}
-                      value={target}
-                      onChange={setTarget}
-                    />
-                    <Text style={s.label}>コレクション</Text>
-                    <TextInput
-                      style={s.input}
-                      value={collection}
-                      onChangeText={setCollection}
-                      maxLength={120}
-                    />
-                    {!selected && (
-                      <>
-                        <Text style={s.label}>画像URL（HTTPS）</Text>
-                        <TextInput
-                          style={s.input}
-                          value={url}
-                          onChangeText={setUrl}
-                          autoCapitalize="none"
-                          keyboardType="url"
-                        />
-                      </>
-                    )}
-                  </>
-                )}
-                <Pressable
-                  disabled={busy}
-                  style={s.primary}
-                  onPress={
-                    selected
-                      ? async () => {
-                          if (!title.trim() || !collection.trim()) {
-                            setError(
-                              "タイトルとコレクションを入力してください",
-                            );
-                            return;
-                          }
-                          setBusy(true);
-                          try {
-                            const a =
-                              mode === "demo"
-                                ? {
-                                    ...selected,
-                                    title,
-                                    groupId: target,
-                                    collection,
-                                  }
-                                : await request<Artwork>(
-                                    `/artworks/${selected.id}`,
-                                    {
-                                      method: "PATCH",
-                                      body: JSON.stringify({
-                                        title,
-                                        groupId: target,
-                                        collection,
-                                      }),
-                                    },
-                                  );
-                            await update({
-                              ...data,
-                              artworks: data.artworks.map((x) =>
-                                x.id === a.id ? a : x,
-                              ),
-                            });
-                            setSelected(null);
-                          } catch (e) {
-                            setError((e as Error).message);
-                          } finally {
-                            setBusy(false);
-                          }
-                        }
-                      : save
-                  }
-                >
-                  <Text style={s.primaryText}>
-                    {busy ? "保存中…" : "保存する"}
-                  </Text>
-                </Pressable>
-                {selected && (
-                  <Pressable
-                    onPress={() =>
-                      Alert.alert(
-                        "作品を削除",
-                        "Driveの元ファイルは削除されません。",
-                        [
-                          { text: "キャンセル", style: "cancel" },
-                          {
-                            text: "削除",
-                            style: "destructive",
-                            onPress: async () => {
-                              try {
-                                if (mode === "live")
-                                  await request(`/artworks/${selected.id}`, {
-                                    method: "DELETE",
-                                  });
-                                await update({
-                                  ...data,
-                                  artworks: data.artworks.filter(
-                                    (a) => a.id !== selected.id,
-                                  ),
-                                });
-                                setSelected(null);
-                              } catch (e) {
-                                setError((e as Error).message);
-                              }
-                            },
-                          },
-                        ],
-                      )
-                    }
-                  >
-                    <Text style={s.delete}>ライブラリから削除</Text>
-                  </Pressable>
-                )}
-              </>
-            )}
-            {busy && (
-              <ActivityIndicator color="#466042" style={{ marginTop: 16 }} />
-            )}
-            {!!error && (
-              <Text accessibilityRole="alert" style={s.error}>
-                {error}
-              </Text>
-            )}
-          </ScrollView>
-        </SafeAreaView>
+        {selected ? (
+          <ArtworkViewer
+            id={selected.id}
+            title={selected.title}
+            source={picture(selected, 1024)}
+            index={selectedIndex}
+            count={artworks.length}
+            onNavigate={navigateArtwork}
+            onClose={() => setSelected(null)}
+            onCopy={() => copyImage(selected)}
+            copying={copyingId !== null}
+            feedback={copyStatus}
+          >
+            {modalContent}
+          </ArtworkViewer>
+        ) : (
+          modalContent
+        )}
       </Modal>
     </SafeAreaView>
   );
@@ -917,10 +906,12 @@ function GroupPicker({
   groups,
   value,
   onChange,
+  dark = false,
 }: {
   groups: Group[];
   value: string;
   onChange: (v: string) => void;
+  dark?: boolean;
 }) {
   return (
     <ScrollView
@@ -931,16 +922,33 @@ function GroupPicker({
       {groups.map((g) => (
         <Pressable
           key={g.id}
-          style={[s.chip, value === g.id && s.chipActive]}
+          style={[
+            s.chip,
+            value === g.id && s.chipActive,
+            dark && {
+              backgroundColor: value === g.id ? "#ffffff30" : "#ffffff0e",
+            },
+          ]}
           onPress={() => onChange(g.id)}
         >
-          <Text style={s.chipText}>{g.name}</Text>
+          <Text style={[s.chipText, dark && { color: "#fff" }]}>{g.name}</Text>
         </Pressable>
       ))}
     </ScrollView>
   );
 }
 const s = StyleSheet.create({
+  viewerInfoSafe: { backgroundColor: "transparent" },
+  viewerInfoContent: { padding: 20, paddingBottom: 28 },
+  viewerInfoMuted: { color: "#e1e5e9" },
+  viewerInfoInput: {
+    backgroundColor: "#ffffff12",
+    borderColor: "#ffffff40",
+    color: "#fff",
+  },
+  viewerInfoPrimary: { backgroundColor: "#526945" },
+  viewerInfoDelete: { color: "#f0b3a7" },
+
   safe: { flex: 1, backgroundColor: "#fafbf8" },
   header: {
     paddingHorizontal: 23,
