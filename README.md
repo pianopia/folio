@@ -57,11 +57,13 @@ Runtime configuration:
 | `API_ORIGIN`                                | Public API origin for Google OAuth callbacks                   |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional until Google Drive OAuth is configured                |
 
-The runtime identity has access only to the application's three secrets:
+The runtime identity has access only to the application's five secrets:
 
 - `folio-turso-auth-token`
 - `folio-api-token`
 - `folio-token-encryption-key`
+- `folio-google-client-id`
+- `folio-google-client-secret`
 
 Do not put secret values in source files, Docker build arguments, GitHub, or public build logs. The deployment script references Secret Manager names only. To redeploy after the initial infrastructure setup:
 
@@ -83,6 +85,8 @@ gcloud secrets versions access latest --secret=folio-api-token --project=pianopi
 `GET /api/health` checks the database and reports `storage: "turso"`. An unauthenticated request to `/api/library` returns 401.
 
 ## Google Drive setup
+
+Production has a dedicated **Folio Web (Cloud Run)** OAuth client configured in the `pianopia` project. Its credentials are injected from Secret Manager. The consent screen currently uses external **Testing** mode; only registered test users can authorize the application. Account authorization is a separate step from configuring the client.
 
 Enable the Google Drive API in a Google Cloud project, configure the consent screen, and create an OAuth client of type **Web application**. Register this exact redirect URI using your deployed origin:
 
