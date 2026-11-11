@@ -2,5 +2,9 @@
   "name": "folio-runtime",
   "private": true,
   "type": "module",
-  "dependencies": { "@libsql/client": "0.18.0" }
+  "dependencies": {
+    "@libsql/client": "0.18.0",
+    "@google-cloud/storage": "8.4.0",
+    "sharp": "0.35.5"
+  }
 }

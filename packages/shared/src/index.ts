@@ -13,8 +13,11 @@ export type Artwork = {
   tags: string[];
   favorite: boolean;
   createdAt: string;
-  source: "sample" | "drive";
+  source: "sample" | "drive" | "storage";
   driveId?: string;
+  storageKey?: string;
+  contentType?: string;
+  uploaded?: boolean;
   ownerId?: string;
 };
 export const initialGroups: Group[] = [

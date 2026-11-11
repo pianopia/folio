@@ -5,6 +5,15 @@ import { HTTPException } from "hono/http-exception";
 import { openDatabase } from "./database";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Artwork, Group } from "@folio/shared";
+import {
+  cloudStorage,
+  prepareImage,
+  uploadDriveImage,
+  DRIVE_FILE_SCOPE,
+  MAX_UPLOAD_BYTES,
+  type ObjectStorage,
+} from "./uploads";
+import { hash } from "./auth";
 import { DriveCache } from "./drive-cache";
 import {
   initializeAuth,
@@ -19,10 +28,19 @@ type Options = {
   webOrigin?: string;
   legacyOwnerEmail?: string;
   verifyIdentity?: typeof verifyGoogleIdentity;
+  objectStorage?: ObjectStorage;
 };
 export async function createApp(options: Options = {}) {
   const db = await openDatabase(options.database);
   await initializeAuth(db);
+  await db
+    .query(
+      "CREATE TABLE IF NOT EXISTS drive_upload_folders (user_id TEXT PRIMARY KEY, folder_id TEXT NOT NULL)",
+    )
+    .run();
+  const objects = options.objectStorage ?? cloudStorage();
+  let activeUploads = 0;
+  const folderPending = new Map<string, Promise<string>>();
   const origin =
     options.webOrigin ?? process.env.WEB_ORIGIN ?? "http://127.0.0.1:5173";
   const app = new Hono<AuthEnv>();
@@ -35,12 +53,14 @@ export async function createApp(options: Options = {}) {
       allowHeaders: ["Content-Type", "Authorization"],
     }),
   );
-  app.use(
-    "/api/*",
+  app.use("/api/*", (c, next) =>
     bodyLimit({
-      maxSize: 1024 * 1024,
-      onError: (c) => c.json({ error: "リクエストが大きすぎます" }, 413),
-    }),
+      maxSize:
+        c.req.path === "/api/artworks/upload" && c.req.method === "POST"
+          ? MAX_UPLOAD_BYTES + 64 * 1024
+          : 1024 * 1024,
+      onError: (c) => c.json({ error: "画像は1枚20MB以下にしてください" }, 413),
+    })(c, next),
   );
   app.onError((e, c) => {
     if (e instanceof HTTPException)
@@ -112,6 +132,56 @@ export async function createApp(options: Options = {}) {
         ),
       );
     clear(userId);
+  }
+  const canUploadDrive = async (userId: string) => {
+    const value = await secret(userId);
+    if (!value) return false;
+    const credentials = JSON.parse(decrypt(String(value)));
+    const scopes = String(credentials?.scope ?? "").split(" ");
+    return (
+      scopes.includes(DRIVE_FILE_SCOPE) ||
+      scopes.includes("https://www.googleapis.com/auth/drive")
+    );
+  };
+  async function driveFolder(userId: string, access: string): Promise<string> {
+    const existing = await db
+      .query("SELECT folder_id FROM drive_upload_folders WHERE user_id=?")
+      .get(userId);
+    if (existing) return String(existing.folder_id);
+    const pending = folderPending.get(userId);
+    if (pending) return pending;
+    const task = (async () => {
+      const response = await fetch(
+        "https://www.googleapis.com/drive/v3/files?fields=id",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${access}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: "Folio uploads",
+            mimeType: "application/vnd.google-apps.folder",
+          }),
+          signal: AbortSignal.timeout(20000),
+        },
+      );
+      if (!response.ok)
+        throw new HTTPException(502, {
+          message:
+            "Driveの保存フォルダを作成できませんでした。追加権限・空き容量を確認してください",
+        });
+      const folder = (await response.json()) as { id: string };
+      if (!/^[a-zA-Z0-9_-]+$/.test(folder.id)) throw new HTTPException(502);
+      await db
+        .query(
+          "INSERT OR REPLACE INTO drive_upload_folders(user_id,folder_id) VALUES(?,?)",
+        )
+        .run(userId, folder.id);
+      return folder.id;
+    })().finally(() => folderPending.delete(userId));
+    folderPending.set(userId, task);
+    return task;
   }
   setupAuth(app, db, origin, configured, { ...options, saveDrive });
   async function googleToken(userId: string): Promise<string> {
@@ -338,11 +408,128 @@ export async function createApp(options: Options = {}) {
     return c.json(await save("art", a));
   });
   app.delete("/api/artworks/:id", async (c) => {
-    await requireArtwork(c.get("user").id, c.req.param("id"), true);
+    const art = await requireArtwork(c.get("user").id, c.req.param("id"), true);
     await db
       .query("DELETE FROM library_records WHERE kind='art' AND id=?")
       .run(c.req.param("id"));
+    if (art.source === "storage" && art.storageKey && objects) {
+      const results = await Promise.allSettled(
+        ["original", "512.webp", "1024.webp"].map((suffix) =>
+          objects.remove(`${art.storageKey}/${suffix}`),
+        ),
+      );
+      if (results.some((r) => r.status === "rejected"))
+        console.error("Upload object cleanup failed");
+    }
     return c.body(null, 204);
+  });
+  app.get("/api/uploads/status", async (c) => {
+    const drive = Boolean(await secret(c.get("user").id));
+    const writable = drive && (await canUploadDrive(c.get("user").id));
+    return c.json({
+      destination: drive ? "drive" : "storage",
+      canUpload: drive ? writable : Boolean(objects),
+      reauthRequired: drive && !writable,
+      maxBytes: MAX_UPLOAD_BYTES,
+    });
+  });
+  app.post("/api/artworks/upload", async (c) => {
+    if (activeUploads >= 2)
+      throw new HTTPException(429, {
+        message: "アップロードが混み合っています。少し待って再試行してください",
+      });
+    activeUploads++;
+    try {
+      const userId = c.get("user").id;
+      const form = await c.req.formData().catch(() => {
+        throw new HTTPException(400, {
+          message: "画像ファイルを選択してください",
+        });
+      });
+      const groupId = String(form.get("groupId") ?? "");
+      await requireGroup(userId, groupId, true);
+      const file = form.get("file");
+      if (!(file instanceof File))
+        throw new HTTPException(400, {
+          message: "画像ファイルを選択してください",
+        });
+      const title = name(
+        form.get("title") || file.name.replace(/\.[^.]+$/, "").slice(0, 120),
+      );
+      const collection = name(form.get("collection") || "Uploads");
+      const drive = Boolean(await secret(userId));
+      if (drive && !(await canUploadDrive(userId)))
+        throw new HTTPException(409, {
+          message:
+            "Driveへの保存に追加権限が必要です。「アップロード権限を追加」から再接続してください",
+        });
+      if (!drive && !objects)
+        throw new HTTPException(503, {
+          message: "Cloud Storageの保存先が未設定です",
+        });
+      const image = await prepareImage(file);
+      const id = crypto.randomUUID();
+      const artwork: Artwork = {
+        id,
+        ownerId: userId,
+        title,
+        groupId,
+        collection,
+        url: `/api/artworks/${id}/image`,
+        tags: [],
+        favorite: false,
+        createdAt: new Date().toISOString(),
+        source: drive ? "drive" : "storage",
+        uploaded: true,
+        contentType: image.contentType,
+      };
+      if (drive) {
+        const access = await googleToken(userId);
+        const folder = await driveFolder(userId, access);
+        const uploaded = await uploadDriveImage(access, folder, image);
+        artwork.driveId = uploaded.id;
+        try {
+          await save("art", artwork);
+        } catch (error) {
+          // Only remove the just-created file when its library registration failed.
+          await fetch(
+            `https://www.googleapis.com/drive/v3/files/${uploaded.id}`,
+            {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${access}` },
+              signal: AbortSignal.timeout(20000),
+            },
+          ).catch(() => {});
+          throw error;
+        }
+        cache(userId).clear();
+        cache(userId).remember(uploaded);
+        cache(userId).seedPreview(uploaded.id, 512, image.previews[512]);
+        cache(userId).seedPreview(uploaded.id, 1024, image.previews[1024]);
+      } else {
+        const key = `users/${hash(userId)}/${id}`;
+        artwork.storageKey = key;
+        const paths = [
+          `${key}/original`,
+          `${key}/512.webp`,
+          `${key}/1024.webp`,
+        ];
+        try {
+          await objects!.save(paths[0], image.bytes, image.contentType);
+          await objects!.save(paths[1], image.previews[512], "image/webp");
+          await objects!.save(paths[2], image.previews[1024], "image/webp");
+          await save("art", artwork);
+        } catch {
+          await Promise.allSettled(paths.map((path) => objects!.remove(path)));
+          throw new HTTPException(502, {
+            message: "Cloud Storageへの保存に失敗しました。再試行してください",
+          });
+        }
+      }
+      return c.json(artwork, 201);
+    } finally {
+      activeUploads--;
+    }
   });
   app.post("/api/artworks", async (c) => {
     const b = await parse(c);
@@ -470,14 +657,34 @@ export async function createApp(options: Options = {}) {
   app.get("/api/drive/image/:id", (c) =>
     image(c.get("user").id, c.req.param("id")),
   );
+  async function storageImage(art: Artwork, size?: 512 | 1024) {
+    if (!objects || !art.storageKey) throw new HTTPException(404);
+    const bytes = await objects.read(
+      `${art.storageKey}/${size ? `${size}.webp` : "original"}`,
+    );
+    return new Response(bytes as BodyInit, {
+      headers: {
+        "Content-Type": size
+          ? "image/webp"
+          : (art.contentType ?? "application/octet-stream"),
+        "Cache-Control": "no-store",
+        Vary: "Authorization, Cookie",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+      },
+    });
+  }
   app.get("/api/artworks/:id/thumbnail", async (c) => {
     const art = await requireArtwork(c.get("user").id, c.req.param("id"));
+    if (art.source === "storage")
+      return storageImage(art, c.req.query("size") === "1024" ? 1024 : 512);
     if (art.source !== "drive" || !art.driveId || !art.ownerId)
       throw new HTTPException(404);
     return thumbnail(c, art.ownerId, art.driveId);
   });
   app.get("/api/artworks/:id/image", async (c) => {
     const art = await requireArtwork(c.get("user").id, c.req.param("id"));
+    if (art.source === "storage") return storageImage(art);
     if (art.source !== "drive" || !art.driveId || !art.ownerId)
       throw new HTTPException(404);
     return image(art.ownerId, art.driveId);

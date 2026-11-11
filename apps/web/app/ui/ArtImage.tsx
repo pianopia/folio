@@ -92,7 +92,7 @@ export default function ArtImage({
   size?: 512 | 1024;
   eager?: boolean;
 }) {
-  return art.source === "drive" ? (
+  return art.source !== "sample" ? (
     <DriveThumbnail path={previewPath(art, size)} alt={alt} eager={eager} />
   ) : (
     <img

@@ -2,7 +2,7 @@ import type { Artwork } from "@folio/shared";
 import { apiBase, getAuthToken } from "./api";
 
 async function pngForArtwork(art: Artwork): Promise<Blob> {
-  const isDrive = art.source === "drive";
+  const isDrive = art.source !== "sample";
   const token = isDrive ? getAuthToken() : "";
   const response = await fetch(isDrive ? `${apiBase()}${art.url}` : art.url, {
     credentials: isDrive ? "include" : "omit",

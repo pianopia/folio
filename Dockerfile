@@ -9,7 +9,7 @@ RUN bun install --frozen-lockfile
 COPY apps ./apps
 COPY packages ./packages
 RUN bun run build
-RUN bun build apps/api/src/index.ts --target=bun --external '@libsql/client' --outfile=/app/server/index.js
+RUN bun build apps/api/src/index.ts --target=bun --external '@libsql/client' --external '@google-cloud/storage' --external sharp --outfile=/app/server/index.js
 
 FROM oven/bun:1.2.20 AS runtime-deps
 WORKDIR /runtime

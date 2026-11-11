@@ -213,7 +213,7 @@ export function setupAuth(
       scope:
         mode === "login"
           ? "openid email profile"
-          : "openid email profile https://www.googleapis.com/auth/drive.readonly",
+          : "openid email profile https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file",
       ...(mode === "drive"
         ? {
             access_type: "offline",

@@ -13,7 +13,7 @@ A Google Drive connected artwork library for Web, iOS, and Android.
 
 ## Features
 
-Google account sign-in, private per-user Drive connections, explicit group sharing, group and collection organization, search, favorites, artwork editing, Google Drive import, and one-click image copying. Drive browsing uses 512px thumbnails, 1024px detail previews, bounded caches, nearby-image preloading, and previous/next navigation. Copying fetches the original image and writes PNG data to the clipboard.
+Google account sign-in, private per-user Drive connections, explicit group sharing, group and collection organization, search, favorites, artwork editing, Google Drive import, direct image uploads, and one-click image copying. Drive browsing uses 512px thumbnails, 1024px detail previews, bounded caches, nearby-image preloading, and previous/next navigation. Copying fetches the original image and writes PNG data to the clipboard.
 
 Each Google account has its own library and Drive authorization. Groups form access-control boundaries; only owners can add or remove read-only members.
 
@@ -49,6 +49,7 @@ Runtime configuration:
 
 | Variable                                    | Purpose                                                           |
 | ------------------------------------------- | ----------------------------------------------------------------- |
+| `UPLOAD_BUCKET`                             | Private Cloud Storage bucket for unconnected users                |
 | `TURSO_DATABASE_URL`                        | Dedicated Turso database URL                                      |
 | `TURSO_AUTH_TOKEN`                          | Database-scoped token, injected from Secret Manager               |
 | `LEGACY_OWNER_EMAIL`                        | Explicit verified owner allowed to migrate the old workspace once |
@@ -77,7 +78,7 @@ The script builds an image in Cloud Build, deploys it, and updates the Web/API o
 
 Sign in with your Google account on the Web. Each login creates an opaque, random seven-day HttpOnly session; only its SHA-256 hash is stored in Turso. Logout revokes that session immediately. Shared `API_TOKEN` values and old workspace cookies are rejected.
 
-The sign-in flow requests `openid email profile`. Drive connection is separate and also requests `drive.readonly`; the verified Google subject must match the signed-in user. OAuth uses one-time server-stored state, browser binding, nonce and PKCE. Google ID-token signatures, issuer, audience, expiry and verified email are validated with Google's public keys.
+The sign-in flow requests `openid email profile`. Drive connection is separate and requests `drive.readonly` plus `drive.file`; the verified Google subject must match the signed-in user. OAuth uses one-time server-stored state, browser binding, nonce and PKCE. Google ID-token signatures, issuer, audience, expiry and verified email are validated with Google's public keys.
 
 Each account starts with a private group. In Settings, the owner can grant registered users read access to a specific group or remove that access. Members can view/copy only artworks explicitly placed in that group; they cannot browse the owner's Drive, edit artworks, move them to another group, or manage membership. Sharing includes future artworks added to the group. Media requests check current membership every time and send `Cache-Control: no-store`. An already viewed/downloaded image cannot be recalled from a recipient.
 
@@ -97,9 +98,19 @@ https://YOUR-CLOUD-RUN-ORIGIN/api/drive/callback
 
 Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on Cloud Run (use Secret Manager for the secret). Sign in, then choose **Google Drive を接続** in the Web.
 
-The application requests `drive.readonly`. It does not change or delete original Drive files. OAuth access/refresh tokens are encrypted with AES-256-GCM before being saved to Turso. The token-encryption key must remain stable across revisions. Disconnecting revokes Google's token and clears the preview caches.
+The application requests `drive.readonly` for browsing and `drive.file` to create/manage files created or selected through Folio. Existing read-only connections must be reauthorized before uploading. It does not change or delete original Drive files. OAuth access/refresh tokens are encrypted with AES-256-GCM before being saved to Turso. The token-encryption key must remain stable across revisions. Disconnecting revokes Google's token and clears the preview caches.
 
 Google OAuth credentials must be configured separately; deploying the service does not create a Google OAuth client or connect a Drive account.
+
+## Image uploads
+
+Choose **作品を追加** to select or drop up to 10 images. Each image is uploaded separately with progress and per-file errors; successful files stay saved when another file fails. Supported originals: JPEG, PNG, WebP and GIF, up to 20 MiB and 32 million pixels each. The server decodes images to validate their actual format and creates bounded 512/1024px WebP previews. SVG, HTML and invalid image payloads are rejected.
+
+The server selects the destination from the signed-in user's connection: connected accounts save to their own **Folio uploads** folder in Drive, and unconnected accounts save to private Cloud Storage. Missing Drive write permission asks for reauthorization; Drive failures never silently switch storage providers. Drive originals are kept when removing a library item. Removing a Cloud Storage artwork deletes its managed original and preview objects; a failed initial registration cleans up the objects created by that request.
+
+Production uses bucket `pianopia-folio-artworks` in Tokyo with uniform bucket-level access and public access prevention. Set `UPLOAD_BUCKET` and grant the runtime service account `roles/storage.objectUser` on that bucket only. Originals and previews have no public or signed links; the API checks user/group access before serving either. Newly uploaded Drive images are primed into the private preview cache for immediate display.
+
+API: `GET /api/uploads/status` reports the current destination and any required reauthorization. `POST /api/artworks/upload` accepts multipart fields `file`, `groupId`, optional `title` and `collection`. Clients cannot override the owner or destination. React Native uses the system photo picker and the same upload API.
 
 ## Mobile
 

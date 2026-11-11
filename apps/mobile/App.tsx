@@ -15,6 +15,7 @@ import {
   ActivityIndicator,
   Linking,
 } from "react-native";
+import UploadImages from "./UploadImages";
 import * as SecureStore from "expo-secure-store";
 import * as Crypto from "expo-crypto";
 import * as Clipboard from "expo-clipboard";
@@ -64,7 +65,7 @@ export default function App() {
     if (copyingId) return;
     setCopyingId(art.id);
     try {
-      const isDrive = art.source === "drive";
+      const isDrive = art.source !== "sample";
       const response = await fetch(isDrive ? `${api}${art.url}` : art.url, {
         headers: isDrive && token ? { Authorization: `Bearer ${token}` } : {},
         signal: AbortSignal.timeout(30000),
@@ -97,6 +98,7 @@ export default function App() {
   }
   const [draftApi, setDraftApi] = useState(api);
   const [userEmail, setUserEmail] = useState("");
+  const [userId, setUserId] = useState("");
   const [deviceLogin, setDeviceLogin] = useState<{
     deviceCode: string;
     userCode: string;
@@ -132,9 +134,12 @@ export default function App() {
   }, []);
   async function load() {
     try {
-      const me = await request<{ user: { email: string } | null }>("/auth/me");
+      const me = await request<{ user: { id: string; email: string } | null }>(
+        "/auth/me",
+      );
       if (!me.user) throw Error("ログインしてください");
       setUserEmail(me.user.email);
+      setUserId(me.user.id);
       setData(await request<Data>("/library"));
       setMode("live");
     } catch {
@@ -285,11 +290,11 @@ export default function App() {
   }
   const picture = (a: Artwork, size = 512) => ({
     uri:
-      a.source === "drive"
+      a.source !== "sample"
         ? `${api}/api/artworks/${encodeURIComponent(a.id)}/thumbnail?size=${size}`
         : a.url,
     headers:
-      a.source === "drive" && token
+      a.source !== "sample" && token
         ? { Authorization: `Bearer ${token}` }
         : undefined,
   });
@@ -739,6 +744,22 @@ export default function App() {
                       </Text>
                     </Pressable>
                   </View>
+                )}
+                {modal === "add" && mode === "live" && (
+                  <UploadImages
+                    api={api}
+                    token={token}
+                    groups={data.groups.filter((g) => g.ownerId === userId)}
+                    onUploaded={(art) =>
+                      setData((d) => ({
+                        ...d,
+                        artworks: [
+                          art,
+                          ...d.artworks.filter((a) => a.id !== art.id),
+                        ],
+                      }))
+                    }
+                  />
                 )}
                 <Text style={s.label}>
                   {modal === "group" ? "グループ名" : "タイトル"}

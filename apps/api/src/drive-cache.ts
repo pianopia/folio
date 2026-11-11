@@ -30,7 +30,7 @@ export class DriveCache {
   private generation = 0;
   constructor(
     private token: () => Promise<string>,
-    private fetcher: Fetcher = (url, init) => fetch(url, init)
+    private fetcher: Fetcher = (url, init) => fetch(url, init),
   ) {}
   clear() {
     this.generation++;
@@ -84,6 +84,23 @@ export class DriveCache {
     while (this.metadata.size > 2000)
       this.metadata.delete(this.metadata.keys().next().value!);
   }
+  seedPreview(id: string, size: 512 | 1024, bytes: Uint8Array) {
+    const key = `${id}:${size}`;
+    const old = this.previews.get(key);
+    if (old) this.totalBytes -= old.bytes.byteLength;
+    this.previews.set(key, {
+      bytes,
+      contentType: "image/webp",
+      etag: createHash("sha256").update(bytes).digest("hex"),
+      expires: Date.now() + PREVIEW_TTL,
+    });
+    this.totalBytes += bytes.byteLength;
+    while (this.totalBytes > 32 * 1024 * 1024 && this.previews.size) {
+      const [oldest, value] = this.previews.entries().next().value!;
+      this.previews.delete(oldest);
+      this.totalBytes -= value.bytes.byteLength;
+    }
+  }
   async list(folder = "", pageToken = "", refresh = false): Promise<Page> {
     const key = `list:${folder}:${pageToken}`;
     const cached = this.pages.get(key);
@@ -106,7 +123,7 @@ export class DriveCache {
         this.fetcher(u.href, {
           headers: { Authorization: `Bearer ${access}` },
           signal: AbortSignal.timeout(20000),
-        })
+        }),
       );
       if (!response.ok)
         throw new HTTPException(502, {
@@ -134,8 +151,8 @@ export class DriveCache {
           {
             headers: { Authorization: `Bearer ${access}` },
             signal: AbortSignal.timeout(20000),
-          }
-        )
+          },
+        ),
       );
       if (!response.ok)
         throw new HTTPException(response.status === 404 ? 404 : 502, {
@@ -183,7 +200,7 @@ export class DriveCache {
             headers: { Authorization: `Bearer ${access}` },
             redirect: "error",
             signal: AbortSignal.timeout(20000),
-          })
+          }),
         );
       };
       let response = await download(file.thumbnailLink);
