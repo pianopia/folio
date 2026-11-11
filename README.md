@@ -2,6 +2,10 @@
 
 A Google Drive connected artwork library for Web, iOS, and Android.
 
+- Production Web: https://folio-biti2v34ya-an.a.run.app
+- API health: https://folio-biti2v34ya-an.a.run.app/api/health
+- Public source: https://github.com/pianopia/folio
+
 - Web: Remix 2 + TypeScript, served as an SPA by the Hono application.
 - API: Bun + Hono, with the Web and `/api/*` on one Cloud Run origin.
 - Database: a dedicated Turso database through `@libsql/client`.

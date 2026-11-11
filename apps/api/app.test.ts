@@ -124,3 +124,69 @@ describe("workspace API", () => {
     db.close();
   });
 });
+
+test("preserves edits and secrets when a persistent database is reopened", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const folder = await mkdtemp(join(tmpdir(), "folio-db-"));
+  try {
+    const path = join(folder, "persistent.db");
+    const first = await createApp({
+      database: path,
+      token: "persistence-test",
+    });
+    const headers = {
+      Authorization: "Bearer persistence-test",
+      "Content-Type": "application/json",
+    };
+    const group = await (
+      await first.app.request("http://localhost/api/groups", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name: "Persisted group" }),
+      })
+    ).json();
+    expect(group.id).toBeString();
+    expect(
+      (
+        await first.app.request("http://localhost/api/artworks/art-0", {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ title: "Persisted title", groupId: group.id }),
+        })
+      ).status
+    ).toBe(200);
+    await first.db
+      .query("INSERT INTO secrets(id,value) VALUES(?,?)")
+      .run("encrypted-fixture", "test-ciphertext");
+    first.db.close();
+    const second = await createApp({
+      database: path,
+      token: "persistence-test",
+    });
+    try {
+      const library = await (
+        await second.app.request("http://localhost/api/library", { headers })
+      ).json();
+      expect(library.groups.find((g: any) => g.id === group.id)?.name).toBe(
+        "Persisted group"
+      );
+      expect(library.artworks.find((a: any) => a.id === "art-0")).toMatchObject(
+        { title: "Persisted title", groupId: group.id }
+      );
+      expect(library.artworks).toHaveLength(12);
+      expect(
+        (
+          await second.db
+            .query("SELECT value FROM secrets WHERE id=?")
+            .get("encrypted-fixture")
+        )?.value
+      ).toBe("test-ciphertext");
+    } finally {
+      second.db.close();
+    }
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
