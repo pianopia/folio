@@ -55,7 +55,6 @@ export default function UploadPreview({
       <div className="upload-preview-heading">
         <div>
           <span>
-            {item?.uploaded ? "アップロード済み画像" : "アップロード前の確認"} ·{" "}
             {index + 1} / {items.length}
           </span>
           <h3 id="upload-preview-title">{item?.name}</h3>
@@ -67,7 +66,7 @@ export default function UploadPreview({
           onClick={onClose}
           aria-label="プレビューを閉じる"
         >
-          閉じる ×
+          ×
         </button>
       </div>
       {item && (
@@ -85,13 +84,11 @@ export default function UploadPreview({
           onClick={() => navigate(-1)}
           aria-label="前の選択画像"
         >
-          ← 前へ
+          ←
         </button>
         <span>
           {item ? `${(item.size / 1024 / 1024).toFixed(1)}MB` : ""} ·{" "}
-          {item?.uploaded
-            ? "アップロード済み"
-            : "まだアップロードされていません"}
+          {item?.uploaded ? "アップロード済み" : "未アップロード"}
         </span>
         <button
           type="button"
@@ -100,7 +97,7 @@ export default function UploadPreview({
           onClick={() => navigate(1)}
           aria-label="次の選択画像"
         >
-          次へ →
+          →
         </button>
       </div>
       {item && onRemove && (

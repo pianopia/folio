@@ -966,9 +966,6 @@ export default function Library() {
       )}
       {modal === "add" && (
         <Dialog title="作品を追加" onClose={() => setModal(null)}>
-          <p className="dialog-intro">
-            画像をアップロードするか、Google Driveの作品を取り込めます。
-          </p>
           {user && (
             <UploadPanel
               groups={ownedGroups}
@@ -986,76 +983,79 @@ export default function Library() {
               画像のアップロードはGoogleログイン後に利用できます。
             </p>
           )}
-          <button className="drive-option" onClick={openDrive}>
-            <DriveIcon />
-            Google Driveから取り込む
-            <ArrowUpRight size={16} />
-          </button>
-          <details className="url-add">
-            <summary>画像URLから追加</summary>
-            <form onSubmit={(e) => submit(e, "add")}>
-              <label>
-                タイトル
-                <input
-                  name="title"
-                  required
-                  maxLength={120}
-                  placeholder="作品のタイトル"
-                />
-              </label>
-              <label>
-                画像URL
-                <input
-                  name="url"
-                  type="url"
-                  required
-                  pattern="https://.*"
-                  placeholder="https://…"
-                />
-              </label>
-              <div className="form-row">
+          <details className="upload-alternatives">
+            <summary>その他の追加方法</summary>
+            <button className="drive-option" onClick={openDrive}>
+              <DriveIcon />
+              Google Driveから取り込む
+              <ArrowUpRight size={16} />
+            </button>
+            <details className="url-add">
+              <summary>画像URLから追加</summary>
+              <form onSubmit={(e) => submit(e, "add")}>
                 <label>
-                  グループ
-                  <select
-                    name="groupId"
-                    defaultValue={
-                      groupId === "all"
-                        ? (data.groups.find((g) => g.ownerId === user?.id)
-                            ?.id ?? "")
-                        : groupId
-                    }
-                  >
-                    {ownedGroups.map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  コレクション
+                  タイトル
                   <input
-                    name="collection"
+                    name="title"
                     required
                     maxLength={120}
-                    defaultValue="Unsorted"
-                    list="collections"
+                    placeholder="作品のタイトル"
                   />
                 </label>
-              </div>
-              {error && (
-                <p className="error" role="alert">
-                  {error}
-                </p>
-              )}
-              <button
-                type="submit"
-                className="button primary full"
-                disabled={busy}
-              >
-                {busy ? "追加中…" : "作品を追加"}
-              </button>
-            </form>
+                <label>
+                  画像URL
+                  <input
+                    name="url"
+                    type="url"
+                    required
+                    pattern="https://.*"
+                    placeholder="https://…"
+                  />
+                </label>
+                <div className="form-row">
+                  <label>
+                    グループ
+                    <select
+                      name="groupId"
+                      defaultValue={
+                        groupId === "all"
+                          ? (data.groups.find((g) => g.ownerId === user?.id)
+                              ?.id ?? "")
+                          : groupId
+                      }
+                    >
+                      {ownedGroups.map((g) => (
+                        <option key={g.id} value={g.id}>
+                          {g.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    コレクション
+                    <input
+                      name="collection"
+                      required
+                      maxLength={120}
+                      defaultValue="Unsorted"
+                      list="collections"
+                    />
+                  </label>
+                </div>
+                {error && (
+                  <p className="error" role="alert">
+                    {error}
+                  </p>
+                )}
+                <button
+                  type="submit"
+                  className="button primary full"
+                  disabled={busy}
+                >
+                  {busy ? "追加中…" : "作品を追加"}
+                </button>
+              </form>
+            </details>
           </details>
         </Dialog>
       )}

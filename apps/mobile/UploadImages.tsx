@@ -35,6 +35,7 @@ export default function UploadImages({
     [collection, setCollection] = useState("Uploads"),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const preview = previewIndex === null ? undefined : assets[previewIndex];
   function removeAsset(index: number) {
@@ -152,20 +153,17 @@ export default function UploadImages({
     }
   }
   return (
-    <View style={{ paddingVertical: 20, gap: 14 }}>
+    <View style={{ paddingVertical: 12, gap: 12 }}>
       <Text style={{ color: "#435238" }}>
-        保存先：
         {!status
           ? "確認中…"
           : status.destination === "drive"
-            ? "自分のGoogle Drive / Folio uploads"
-            : "Folio Cloud Storage（非公開）"}
+            ? "Google Drive"
+            : "Folio（非公開）"}
       </Text>
       {status?.reauthRequired && (
         <>
-          <Text>
-            Webの「作品を追加」からDriveのアップロード権限を追加して、再度この画面を開いてください。
-          </Text>
+          <Text>Driveのアップロード権限が必要です。</Text>
           <Pressable onPress={() => Linking.openURL(api)}>
             <Text style={{ color: "#527145" }}>Webで権限を追加 →</Text>
           </Pressable>
@@ -183,15 +181,9 @@ export default function UploadImages({
         }}
       >
         <Text style={{ color: "#435238", textAlign: "center" }}>
-          {assets.length ? "＋ 写真を追加で選択" : "＋ 複数の写真を選択"}
-          （最大10枚・1枚20MB）
+          {assets.length ? "＋ 写真を追加" : "＋ 写真を選択"}
         </Text>
       </Pressable>
-      {assets.length > 0 && (
-        <Text style={{ color: "#718364", fontSize: 12 }}>
-          {assets.length}枚を選択中 · タップすると大きく確認できます
-        </Text>
-      )}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
         {assets.map((asset, i) => (
           <View key={asset.uri}>
@@ -205,28 +197,24 @@ export default function UploadImages({
                 source={{ uri: asset.uri }}
                 style={{ width: 84, height: 84, borderRadius: 6 }}
               />
-              <Text
-                style={{
-                  textAlign: "center",
-                  color: "#527145",
-                  fontSize: 11,
-                  marginTop: 5,
-                }}
-              >
-                拡大して確認
-              </Text>
             </Pressable>
             <Pressable
               accessibilityLabel={`写真${i + 1}を選択から外す`}
               disabled={busy}
               onPress={() => removeAsset(i)}
-              style={{ paddingVertical: 8 }}
+              style={{
+                position: "absolute",
+                top: 3,
+                right: 3,
+                width: 24,
+                height: 24,
+                borderRadius: 12,
+                backgroundColor: "#0009",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
             >
-              <Text
-                style={{ textAlign: "center", color: "#92725d", fontSize: 11 }}
-              >
-                外す
-              </Text>
+              <Text style={{ color: "#fff", fontSize: 18 }}>×</Text>
             </Pressable>
           </View>
         ))}
@@ -250,7 +238,7 @@ export default function UploadImages({
             }}
           >
             <Text style={{ color: "#fff", flex: 1 }} numberOfLines={2}>
-              アップロード前の確認 · {(previewIndex ?? 0) + 1} / {assets.length}
+              {(previewIndex ?? 0) + 1} / {assets.length}
               {"\n"}
               {preview?.fileName || "写真"}
             </Text>
@@ -260,7 +248,7 @@ export default function UploadImages({
               onPress={() => setPreviewIndex(null)}
               style={{ padding: 12 }}
             >
-              <Text style={{ color: "#fff" }}>閉じる ×</Text>
+              <Text style={{ color: "#fff" }}>×</Text>
             </Pressable>
           </View>
           {preview && (
@@ -272,7 +260,7 @@ export default function UploadImages({
             />
           )}
           <Text style={{ textAlign: "center", color: "#cbd7bf", padding: 14 }}>
-            まだアップロードされていません
+            未アップロード
           </Text>
           <View
             style={{
@@ -292,7 +280,7 @@ export default function UploadImages({
               }
               style={{ padding: 14 }}
             >
-              <Text style={{ color: "#fff" }}>← 前へ</Text>
+              <Text style={{ color: "#fff" }}>←</Text>
             </Pressable>
             <Pressable
               accessibilityLabel="表示中の画像を選択から外す"
@@ -309,12 +297,12 @@ export default function UploadImages({
               }
               style={{ padding: 14 }}
             >
-              <Text style={{ color: "#fff" }}>次へ →</Text>
+              <Text style={{ color: "#fff" }}>→</Text>
             </Pressable>
           </View>
         </SafeAreaView>
       </Modal>
-      <Text>保存するグループ</Text>
+      <Text>グループ</Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {groups.map((g) => (
           <Pressable
@@ -331,22 +319,30 @@ export default function UploadImages({
           </Pressable>
         ))}
       </View>
-      <TextInput
-        accessibilityLabel="アップロードのコレクション"
-        value={collection}
-        maxLength={120}
-        editable={!busy}
-        onChangeText={setCollection}
-        style={{
-          borderWidth: 1,
-          borderColor: "#dce5d2",
-          borderRadius: 6,
-          padding: 12,
-        }}
-      />
-      <Text style={{ color: "#718364", fontSize: 11 }}>
-        共有グループに保存すると、そのグループのメンバーにも表示されます。
-      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: optionsOpen }}
+        onPress={() => setOptionsOpen(!optionsOpen)}
+      >
+        <Text style={{ color: "#718364", fontSize: 11 }}>
+          詳細設定 {optionsOpen ? "−" : "＋"}
+        </Text>
+      </Pressable>
+      {optionsOpen && (
+        <TextInput
+          accessibilityLabel="アップロードのコレクション"
+          value={collection}
+          maxLength={120}
+          editable={!busy}
+          onChangeText={setCollection}
+          style={{
+            borderWidth: 1,
+            borderColor: "#dce5d2",
+            borderRadius: 6,
+            padding: 12,
+          }}
+        />
+      )}
       <Pressable
         disabled={busy || !assets.length || !groupId || !status?.canUpload}
         onPress={upload}
@@ -360,13 +356,12 @@ export default function UploadImages({
         <Text style={{ color: "white", textAlign: "center" }}>
           {busy
             ? "アップロード中…"
-            : `選択した${assets.length}枚をまとめてアップロード`}
+            : assets.length
+              ? `アップロード（${assets.length}）`
+              : "アップロード"}
         </Text>
       </Pressable>
       {!!message && <Text accessibilityRole="alert">{message}</Text>}
-      <Text style={{ marginTop: 16, color: "#718364" }}>
-        または画像URLから追加
-      </Text>
     </View>
   );
 }

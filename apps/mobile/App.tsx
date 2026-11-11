@@ -310,6 +310,7 @@ export default function App() {
     !selected ||
     mode === "demo" ||
     data.groups.find((g) => g.id === selected.groupId)?.ownerId === userId;
+  const [showUrlFields, setShowUrlFields] = useState(false);
   const modalContent = (
     <SafeAreaView style={[s.safe, selected && s.viewerInfoSafe]}>
       <ScrollView
@@ -539,139 +540,158 @@ export default function App() {
                 }
               />
             )}
-            <Text style={[s.label, selected && s.viewerInfoMuted]}>
-              {modal === "group" ? "グループ名" : "タイトル"}
-            </Text>
-            <TextInput
-              style={[s.input, selected && s.viewerInfoInput]}
-              editable={!selected || canEditSelected}
-              value={title}
-              onChangeText={setTitle}
-              maxLength={120}
-            />
-            {modal !== "group" && (
+            {modal === "add" && mode === "live" && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: showUrlFields }}
+                onPress={() => setShowUrlFields(!showUrlFields)}
+              >
+                <Text style={{ color: "#718364", fontSize: 12 }}>
+                  画像URLから追加 {showUrlFields ? "−" : "＋"}
+                </Text>
+              </Pressable>
+            )}
+            {(modal !== "add" || mode !== "live" || showUrlFields) && (
               <>
                 <Text style={[s.label, selected && s.viewerInfoMuted]}>
-                  グループ
-                </Text>
-                <GroupPicker
-                  dark={!!selected}
-                  groups={data.groups}
-                  value={target}
-                  onChange={setTarget}
-                />
-                <Text style={[s.label, selected && s.viewerInfoMuted]}>
-                  コレクション
+                  {modal === "group" ? "グループ名" : "タイトル"}
                 </Text>
                 <TextInput
                   style={[s.input, selected && s.viewerInfoInput]}
                   editable={!selected || canEditSelected}
-                  value={collection}
-                  onChangeText={setCollection}
+                  value={title}
+                  onChangeText={setTitle}
                   maxLength={120}
                 />
-                {!selected && (
+                {modal !== "group" && (
                   <>
                     <Text style={[s.label, selected && s.viewerInfoMuted]}>
-                      画像URL（HTTPS）
+                      グループ
+                    </Text>
+                    <GroupPicker
+                      dark={!!selected}
+                      groups={data.groups}
+                      value={target}
+                      onChange={setTarget}
+                    />
+                    <Text style={[s.label, selected && s.viewerInfoMuted]}>
+                      コレクション
                     </Text>
                     <TextInput
                       style={[s.input, selected && s.viewerInfoInput]}
-                      value={url}
-                      onChangeText={setUrl}
-                      autoCapitalize="none"
-                      keyboardType="url"
+                      editable={!selected || canEditSelected}
+                      value={collection}
+                      onChangeText={setCollection}
+                      maxLength={120}
                     />
+                    {!selected && (
+                      <>
+                        <Text style={[s.label, selected && s.viewerInfoMuted]}>
+                          画像URL（HTTPS）
+                        </Text>
+                        <TextInput
+                          style={[s.input, selected && s.viewerInfoInput]}
+                          value={url}
+                          onChangeText={setUrl}
+                          autoCapitalize="none"
+                          keyboardType="url"
+                        />
+                      </>
+                    )}
                   </>
                 )}
-              </>
-            )}
-            <Pressable
-              disabled={busy || (!!selected && !canEditSelected)}
-              style={[s.primary, selected && s.viewerInfoPrimary]}
-              onPress={
-                selected
-                  ? async () => {
-                      if (!title.trim() || !collection.trim()) {
-                        setError("タイトルとコレクションを入力してください");
-                        return;
-                      }
-                      setBusy(true);
-                      try {
-                        const a =
-                          mode === "demo"
-                            ? {
-                                ...selected,
-                                title,
-                                groupId: target,
-                                collection,
-                              }
-                            : await request<Artwork>(
-                                `/artworks/${selected.id}`,
-                                {
-                                  method: "PATCH",
-                                  body: JSON.stringify({
+                <Pressable
+                  disabled={busy || (!!selected && !canEditSelected)}
+                  style={[s.primary, selected && s.viewerInfoPrimary]}
+                  onPress={
+                    selected
+                      ? async () => {
+                          if (!title.trim() || !collection.trim()) {
+                            setError(
+                              "タイトルとコレクションを入力してください",
+                            );
+                            return;
+                          }
+                          setBusy(true);
+                          try {
+                            const a =
+                              mode === "demo"
+                                ? {
+                                    ...selected,
                                     title,
                                     groupId: target,
                                     collection,
-                                  }),
-                                },
-                              );
-                        await update({
-                          ...data,
-                          artworks: data.artworks.map((x) =>
-                            x.id === a.id ? a : x,
-                          ),
-                        });
-                        setSelected(null);
-                      } catch (e) {
-                        setError((e as Error).message);
-                      } finally {
-                        setBusy(false);
-                      }
-                    }
-                  : save
-              }
-            >
-              <Text style={s.primaryText}>{busy ? "保存中…" : "保存する"}</Text>
-            </Pressable>
-            {selected && (
-              <Pressable
-                onPress={() =>
-                  Alert.alert(
-                    "作品を削除",
-                    "Driveの元ファイルは削除されません。",
-                    [
-                      { text: "キャンセル", style: "cancel" },
-                      {
-                        text: "削除",
-                        style: "destructive",
-                        onPress: async () => {
-                          try {
-                            if (mode === "live")
-                              await request(`/artworks/${selected.id}`, {
-                                method: "DELETE",
-                              });
+                                  }
+                                : await request<Artwork>(
+                                    `/artworks/${selected.id}`,
+                                    {
+                                      method: "PATCH",
+                                      body: JSON.stringify({
+                                        title,
+                                        groupId: target,
+                                        collection,
+                                      }),
+                                    },
+                                  );
                             await update({
                               ...data,
-                              artworks: data.artworks.filter(
-                                (a) => a.id !== selected.id,
+                              artworks: data.artworks.map((x) =>
+                                x.id === a.id ? a : x,
                               ),
                             });
                             setSelected(null);
                           } catch (e) {
                             setError((e as Error).message);
+                          } finally {
+                            setBusy(false);
                           }
-                        },
-                      },
-                    ],
-                  )
-                }
-              >
-                <Text style={[s.delete, selected && s.viewerInfoDelete]}>
-                  ライブラリから削除
-                </Text>
-              </Pressable>
+                        }
+                      : save
+                  }
+                >
+                  <Text style={s.primaryText}>
+                    {busy ? "保存中…" : "保存する"}
+                  </Text>
+                </Pressable>
+                {selected && (
+                  <Pressable
+                    onPress={() =>
+                      Alert.alert(
+                        "作品を削除",
+                        "Driveの元ファイルは削除されません。",
+                        [
+                          { text: "キャンセル", style: "cancel" },
+                          {
+                            text: "削除",
+                            style: "destructive",
+                            onPress: async () => {
+                              try {
+                                if (mode === "live")
+                                  await request(`/artworks/${selected.id}`, {
+                                    method: "DELETE",
+                                  });
+                                await update({
+                                  ...data,
+                                  artworks: data.artworks.filter(
+                                    (a) => a.id !== selected.id,
+                                  ),
+                                });
+                                setSelected(null);
+                              } catch (e) {
+                                setError((e as Error).message);
+                              }
+                            },
+                          },
+                        ],
+                      )
+                    }
+                  >
+                    <Text style={[s.delete, selected && s.viewerInfoDelete]}>
+                      ライブラリから削除
+                    </Text>
+                  </Pressable>
+                )}
+              </>
             )}
           </>
         )}

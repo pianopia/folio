@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Check, Plus, X } from "lucide-react";
 import UploadPreview from "./UploadPreview";
 import type { Artwork, Group } from "@folio/shared";
 import { apiBase, getAuthToken, request } from "./api";
@@ -169,7 +170,7 @@ export default function UploadPanel({
   }
   async function submit() {
     if (!groupId || !collection.trim()) {
-      setError("保存するグループとコレクションを選択してください");
+      setError("グループとコレクションを選択してください");
       return;
     }
     setPreviewId(null);
@@ -196,20 +197,17 @@ export default function UploadPanel({
   return (
     <section className="upload-panel" aria-label="画像をアップロード">
       <p className="upload-destination">
-        保存先：
         <strong>
           {!status
             ? "確認中…"
             : status.destination === "drive"
-              ? "自分のGoogle Drive / Folio uploads"
-              : "Folio Cloud Storage（非公開）"}
+              ? "Google Drive"
+              : "Folio（非公開）"}
         </strong>
       </p>
       {status?.reauthRequired && (
         <div className="upload-permission">
-          <p>
-            Driveへのアップロードには追加の権限が必要です。許可後に画像を選択してください。
-          </p>
+          <p>Driveのアップロード権限が必要です。</p>
           <button
             className="button secondary full"
             onClick={async () => {
@@ -230,6 +228,7 @@ export default function UploadPanel({
       )}
       <label
         className={`upload-dropzone${dragging ? " dragging" : ""}`}
+        title="JPEG / PNG / WebP / GIF · 20MBまで · 最大10枚 · ドロップ可"
         onDragOver={(e) => {
           e.preventDefault();
           setDragging(true);
@@ -241,13 +240,13 @@ export default function UploadPanel({
           select(e.dataTransfer.files);
         }}
       >
-        <span className="upload-plus">＋</span>
+        <Plus size={22} aria-hidden="true" />
         <strong>
           {items.some((item) => item.state !== "done")
-            ? "画像を追加で選択・ドロップ"
-            : "複数の画像を選択・ドロップ"}
+            ? "画像を追加"
+            : "画像を選択"}
         </strong>
-        <span>JPEG / PNG / WebP / GIF · 1枚20MBまで · 最大10枚</span>
+
         <input
           ref={input}
           type="file"
@@ -263,7 +262,7 @@ export default function UploadPanel({
       </label>
       <div className="form-row">
         <label>
-          保存するグループ
+          グループ
           <select
             value={groupId}
             disabled={busy}
@@ -276,33 +275,20 @@ export default function UploadPanel({
             ))}
           </select>
         </label>
-        <label>
-          コレクション
-          <input
-            value={collection}
-            onChange={(e) => setCollection(e.target.value)}
-            maxLength={120}
-            disabled={busy}
-          />
-        </label>
+        <details className="upload-options">
+          <summary>詳細設定</summary>
+          <label>
+            コレクション
+            <input
+              value={collection}
+              onChange={(e) => setCollection(e.target.value)}
+              maxLength={120}
+              disabled={busy}
+            />
+          </label>
+        </details>
       </div>
-      <p className="field-note">
-        共有メンバーがいるグループを選ぶと、アップロードした作品もそのメンバーに表示されます。
-      </p>
-      {items.length > 0 && (
-        <div className="upload-selection-summary">
-          <strong>
-            {items.every((item) => item.state === "done")
-              ? `${items.length}枚をアップロードしました`
-              : `${items.filter((item) => item.state !== "done").length}枚を選択中`}
-          </strong>
-          <span>サムネイルをクリックすると大きく確認できます</span>
-          {items.every((item) => item.state === "done") && (
-            <span>すべて保存しました</span>
-          )}
-        </div>
-      )}
-      <ul className="upload-items">
+      <ul className="upload-items upload-grid">
         {items.map((item) => (
           <li key={item.id}>
             <button
@@ -310,25 +296,22 @@ export default function UploadPanel({
               className="upload-thumbnail-button"
               onClick={() => setPreviewId(item.id)}
               aria-label={`${item.file.name}を大きくプレビュー`}
+              title={item.file.name}
               disabled={busy}
             >
               <img src={item.preview} alt="" />
-              <span>拡大</span>
             </button>
-            <div>
-              <strong>{item.file.name}</strong>
-              <span>
-                {item.state === "done"
-                  ? "保存しました"
-                  : item.state === "uploading"
-                    ? `${item.progress}%${item.progress >= 95 ? " · 保存中…" : ""}`
-                    : `${(item.file.size / 1024 / 1024).toFixed(1)}MB`}
-              </span>
-              <progress
-                max={100}
-                value={item.progress}
-                aria-label={`${item.file.name}のアップロード進捗`}
-              />
+            <div className="upload-item-status">
+              {item.state === "done" && (
+                <Check size={18} aria-label="保存済み" />
+              )}
+              {item.state === "uploading" && (
+                <progress
+                  max={100}
+                  value={item.progress}
+                  aria-label={`${item.file.name}のアップロード進捗`}
+                />
+              )}
               {item.error && (
                 <p role="alert" className="error">
                   {item.error}
@@ -337,12 +320,12 @@ export default function UploadPanel({
             </div>
             <button
               type="button"
-              className="text-button"
+              className="upload-remove"
               disabled={busy}
               onClick={() => remove(item.id)}
               aria-label={`${item.file.name}を選択から外す`}
             >
-              外す
+              <X size={14} aria-hidden="true" />
             </button>
           </li>
         ))}
@@ -366,7 +349,9 @@ export default function UploadPanel({
           ? `${items.filter((item) => item.state === "done").length} / ${items.length}枚を保存中…`
           : items.length && items.every((i) => i.state === "done")
             ? "アップロード完了"
-            : `選択した${items.filter((i) => i.state !== "done").length}枚をまとめてアップロード`}
+            : items.some((i) => i.state !== "done")
+              ? `アップロード（${items.filter((i) => i.state !== "done").length}）`
+              : "アップロード"}
       </button>
       {previewId && (
         <UploadPreview

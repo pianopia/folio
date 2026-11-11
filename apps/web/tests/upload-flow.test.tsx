@@ -99,7 +99,7 @@ test("select multiple images, inspect full preview, navigate, remove one and upl
     screen.getByRole("button", { name: "first.pngを大きくプレビュー" }),
   );
   expect(screen.getByRole("dialog", { name: "first.png" })).toBeTruthy();
-  expect(screen.getByText(/まだアップロードされていません/)).toBeTruthy();
+  expect(screen.getByText(/未アップロード/)).toBeTruthy();
   fireEvent.keyDown(screen.getByRole("dialog"), { key: "ArrowRight" });
   expect(screen.getByRole("dialog", { name: "second.png" })).toBeTruthy();
   fireEvent.click(
@@ -109,9 +109,7 @@ test("select multiple images, inspect full preview, navigate, remove one and upl
   fireEvent.click(screen.getByRole("button", { name: "プレビューを閉じる" }));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(uploaded).toHaveLength(0);
-  fireEvent.click(
-    screen.getByRole("button", { name: "選択した2枚をまとめてアップロード" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "アップロード（2）" }));
   await waitFor(() => expect(completed).toEqual(["first.png", "third.png"]));
   expect(uploaded).toEqual(["first.png", "third.png"]);
   fireEvent.click(
@@ -129,13 +127,13 @@ test("additional selection and drops keep existing images, deduplicate and enfor
     target: { files: [image("second.png"), image("third.png")] },
   });
   expect(
-    screen.getByRole("button", { name: "選択した3枚をまとめてアップロード" }),
+    screen.getByRole("button", { name: "アップロード（3）" }),
   ).toBeTruthy();
   fireEvent.drop(input.parentElement!, {
     dataTransfer: { files: [image("fourth.png")] },
   });
   expect(
-    screen.getByRole("button", { name: "選択した4枚をまとめてアップロード" }),
+    screen.getByRole("button", { name: "アップロード（4）" }),
   ).toBeTruthy();
   fireEvent.change(input, {
     target: {
@@ -144,7 +142,7 @@ test("additional selection and drops keep existing images, deduplicate and enfor
   });
   expect(screen.getByRole("alert").textContent).toContain("合計10枚まで");
   expect(
-    screen.getByRole("button", { name: "選択した4枚をまとめてアップロード" }),
+    screen.getByRole("button", { name: "アップロード（4）" }),
   ).toBeTruthy();
   expect(uploaded).toHaveLength(0);
 });
@@ -157,19 +155,15 @@ test("one file failing does not stop the batch, and retry only sends failed file
       files: [image("first.png"), image("second.png"), image("third.png")],
     },
   });
-  fireEvent.click(
-    screen.getByRole("button", { name: "選択した3枚をまとめてアップロード" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "アップロード（3）" }));
   await waitFor(() =>
     expect(
-      screen.getByRole("button", { name: "選択した1枚をまとめてアップロード" }),
+      screen.getByRole("button", { name: "アップロード（1）" }),
     ).toBeTruthy(),
   );
   expect(completed).toEqual(["first.png", "third.png"]);
   failed.clear();
-  fireEvent.click(
-    screen.getByRole("button", { name: "選択した1枚をまとめてアップロード" }),
-  );
+  fireEvent.click(screen.getByRole("button", { name: "アップロード（1）" }));
   await waitFor(() =>
     expect(completed).toEqual(["first.png", "third.png", "second.png"]),
   );
