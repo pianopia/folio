@@ -1,0 +1,6 @@
+{
+  "name": "folio-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@libsql/client": "0.18.0" }
+}

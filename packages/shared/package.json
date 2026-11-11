@@ -1,0 +1,5 @@
+{
+  "name": "@folio/shared",
+  "type": "module",
+  "exports": "./src/index.ts"
+}

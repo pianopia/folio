@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "Folio",
+    "slug": "folio-artwork",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "studio.folio.app"
+    },
+    "android": {
+      "package": "studio.folio.app"
+    },
+    "platforms": ["ios", "android"]
+  }
+}

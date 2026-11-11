@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.git/**
+.openai
+.openai/**
+node_modules
+**/node_modules
+**/.expo
+**/build
+dist
+.env
+.env.*
+*.sqlite*
+**/*.sqlite*
