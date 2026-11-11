@@ -9,6 +9,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import type { Artwork, Group } from "@folio/shared";
@@ -23,6 +24,8 @@ export default function UploadImages({
   groups: Group[];
   onUploaded: (art: Artwork) => void;
 }) {
+  const { width } = useWindowDimensions();
+  const imageWidth = Math.max(120, (width - 76) / 2);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -195,7 +198,13 @@ export default function UploadImages({
             >
               <Image
                 source={{ uri: asset.uri }}
-                style={{ width: 84, height: 84, borderRadius: 6 }}
+                resizeMode="contain"
+                style={{
+                  width: assets.length === 1 ? imageWidth * 2 + 12 : imageWidth,
+                  height: assets.length === 1 ? 280 : imageWidth,
+                  borderRadius: 6,
+                  backgroundColor: "#eef2e8",
+                }}
               />
             </Pressable>
             <Pressable
