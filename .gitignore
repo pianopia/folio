@@ -10,3 +10,7 @@ dist/
 .gcloud/
 *.db
 *.db-*
+
+# Expo generates native projects from app.json for local builds.
+apps/mobile/ios/
+apps/mobile/android/

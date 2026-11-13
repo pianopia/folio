@@ -25,11 +25,11 @@ Expo configuration introspection confirms the photo permission is localized and 
 - Complete listing details, age rating, content declarations, reviewer access and release settings in the respective consoles.
 - Check whether the Play account must complete closed testing before production access.
 
-No signed store binaries or review submissions have been created yet.
+The first signed iOS production build has been uploaded to App Store Connect. App Review submission is still pending.
 
 ## Apple account verification
 
-On 2026-11-13, the authenticated Apple Developer account was verified as `grandpianoaoa@gmail.com`, individual team `G28EXCQ6J5`. Membership renewal date shown: 2027-06-26. The updated Apple Developer Program License Agreement was accepted after explicit user confirmation. The update notice disappeared from App Store Connect, and identifier registration became accessible. App Store Connect record `6834296350` was created as `Folio - 画像と作品のライブラリ` using `studio.folio.app` (SKU `pianopia-folio-ios`). The short name `Folio` was unavailable. Japanese description, keywords, marketing URL, version `1.0.0`, copyright and manual-release setting were saved. The subtitle and Graphics & Design primary category were also saved. The App ID is registered with the Sign in with Apple capability; the app/plugin entitlement is configured, and native authentication UI/backend are now implemented. After the user completed EAS two-factor authentication, the existing distribution certificate was reused and a Folio provisioning profile was created (portal ID `4A35NRZ2HA`, expiry 2027-06-30). No signed release binary or review submission has been created yet.
+On 2026-11-13, the authenticated Apple Developer account was verified as `grandpianoaoa@gmail.com`, individual team `G28EXCQ6J5`. Membership renewal date shown: 2027-06-26. The updated Apple Developer Program License Agreement was accepted after explicit user confirmation. The update notice disappeared from App Store Connect, and identifier registration became accessible. App Store Connect record `6834296350` was created as `Folio - 画像と作品のライブラリ` using `studio.folio.app` (SKU `pianopia-folio-ios`). The short name `Folio` was unavailable. Japanese description, keywords, marketing URL, version `1.0.0`, copyright and manual-release setting were saved. The subtitle and Graphics & Design primary category were also saved. The App ID is registered with the Sign in with Apple capability; the app/plugin entitlement is configured, and native authentication UI/backend are now implemented. After the user completed EAS two-factor authentication, the existing distribution certificate was reused and a Folio provisioning profile was created (portal ID `4A35NRZ2HA`, expiry 2027-06-30). A signed release binary was subsequently built and uploaded; App Review remains pending.
 
 ## Implemented submission requirements
 
@@ -39,3 +39,13 @@ On 2026-11-13, the authenticated Apple Developer account was verified as `grandp
 - Account deletion requires explicit confirmation, removes the caller's private Cloud Storage files, metadata, group memberships and sessions, and revokes Apple/Drive authorization. User-owned Drive files remain intact. Failed external cleanup keeps a retryable deletion state; database guards block writes from requests already in flight. A short tombstone outlives the server request deadline.
 - `/privacy.html`, `/support.html` and `/delete-account.html` describe the actual data flow, contact and deletion behavior. Native settings link to privacy/support pages.
 - Automated API tests cover token verification, replay and identity-linking protections, native Drive account isolation, deletion retries and preservation of other accounts. Device testing, release screenshots and store declarations remain necessary before App Review.
+
+## iOS release milestone — 2026-11-13
+
+- EAS production build `6e54ec46-fe30-4601-aff1-5a08cc300124` succeeded: version `1.0.0`, build `1`.
+- EAS submission `19d7330d-8315-4e8d-9f5c-172f9b4edeca` completed successfully. Apple processed build `812e0264-fd0f-4dd6-a399-b5ed2c447b78` as `VALID` / `APP_STORE_ELIGIBLE`, and it is attached to iOS version `1.0.0`.
+- A submission key with the `APP_MANAGER` role is stored by EAS for this project. It is separate from the API’s Sign in with Apple key; neither private key is in source control.
+- Privacy/support URLs, content-rights declaration, age-rating questionnaire and privacy disclosures were saved. Declared linked data: name, email, user ID, photos/videos and other user content, all for app functionality. No tracking categories were declared.
+- Price is free, with Japan as the pricing base. Availability was configured for all 175 territories returned by Apple. Release remains manual.
+- Local iOS Release compilation succeeded with no errors or warnings. Simulator installation/boot failed on iOS 26.2 and 18.6 with CoreSimulator Mach `-308`/invalid-state errors. Restarting Simulator and CoreSimulatorService did not resolve the issue, and the UI automation bridge repeatedly timed out. No screenshots were captured or uploaded; native screen/authentication verification is still pending.
+- Remaining before App Review: release screenshots, reviewer contact phone and final device/authentication verification. Google Play account is still awaiting confirmation.
