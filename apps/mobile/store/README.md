@@ -49,3 +49,7 @@ On 2026-11-13, the authenticated Apple Developer account was verified as `grandp
 - Price is free, with Japan as the pricing base. Availability was configured for all 175 territories returned by Apple. Release remains manual.
 - Local iOS Release compilation succeeded with no errors or warnings. Simulator installation/boot failed on iOS 26.2 and 18.6 with CoreSimulator Mach `-308`/invalid-state errors. Restarting Simulator and CoreSimulatorService did not resolve the issue, and the UI automation bridge repeatedly timed out. No screenshots were captured or uploaded; native screen/authentication verification is still pending.
 - Remaining before App Review: release screenshots, reviewer contact phone and final device/authentication verification. Google Play account is still awaiting confirmation.
+
+## Review-readiness follow-up
+
+The user-provided review phone was saved and verified in App Store Connect (kept out of this public repository). Contact and reviewer access notes are complete. The review draft is `d5906159-96ba-4fa3-a9bf-6e366954abb6`; adding version 1.0.0 now reports only missing iPhone and iPad screenshots. Description, keywords, subtitle and all URLs were re-saved together and verified; localization updates must preserve the existing fields because the Apple SDK turns omitted text fields into null. Google Play remains on hold at the user's request.
