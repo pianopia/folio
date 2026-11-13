@@ -10,16 +10,16 @@
       "bundleIdentifier": "studio.folio.app",
       "buildNumber": "1",
       "appleTeamId": "G28EXCQ6J5",
-      "usesAppleSignIn": true
+      "usesAppleSignIn": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "studio.folio.app",
       "versionCode": 1
     },
-    "platforms": [
-      "ios",
-      "android"
-    ],
+    "platforms": ["ios", "android"],
     "owner": "pianopia",
     "icon": "./assets/icon.png",
     "plugins": [
@@ -32,12 +32,15 @@
         }
       ],
       "expo-secure-store",
-      "expo-apple-authentication"
+      "expo-apple-authentication",
+      "expo-web-browser",
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {
         "projectId": "a543c297-2209-449f-9d4d-162524fa6300"
       }
-    }
+    },
+    "scheme": "folio"
   }
 }

@@ -17,6 +17,8 @@ import {
 } from "react-native";
 import ArtworkViewer from "./ArtworkViewer";
 import UploadImages from "./UploadImages";
+import * as AppleAuthentication from "expo-apple-authentication";
+import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
 import * as Crypto from "expo-crypto";
 import * as Clipboard from "expo-clipboard";
@@ -100,6 +102,115 @@ export default function App() {
   }
   const [draftApi, setDraftApi] = useState(api);
   const [userEmail, setUserEmail] = useState("");
+  const [appleAvailable, setAppleAvailable] = useState(false);
+  const [appleConfigured, setAppleConfigured] = useState(false);
+  const [appleLinked, setAppleLinked] = useState(false);
+  useEffect(() => {
+    AppleAuthentication.isAvailableAsync()
+      .then(setAppleAvailable)
+      .catch(() => {});
+  }, []);
+  async function performAppleLogin() {
+    setBusy(true);
+    setError("");
+    try {
+      const challenge = await request<{ challenge: string; nonce: string }>(
+        "/auth/apple/challenge",
+        { method: "POST" },
+      );
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+        ],
+        nonce: challenge.nonce,
+        state: challenge.challenge,
+      });
+      if (
+        !credential.identityToken ||
+        !credential.authorizationCode ||
+        credential.state !== challenge.challenge
+      )
+        throw Error("Apple認証をやり直してください");
+      const result = await request<{ token: string }>("/auth/apple", {
+        method: "POST",
+        body: JSON.stringify({
+          ...challenge,
+          identityToken: credential.identityToken,
+          authorizationCode: credential.authorizationCode,
+          name: credential.fullName
+            ? AppleAuthentication.formatFullName(credential.fullName)
+            : undefined,
+          mode: userEmail ? "link" : "login",
+        }),
+      });
+      await SecureStore.setItemAsync("folio-token", result.token);
+      setToken(result.token);
+      setDeviceLogin(null);
+      setModal(null);
+    } catch (e) {
+      if ((e as { code?: string }).code !== "ERR_REQUEST_CANCELED")
+        setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  function appleLogin() {
+    if (busy) return;
+    if (userEmail)
+      Alert.alert(
+        "Appleログインを連携",
+        `${userEmail} のFolioアカウントにAppleログインを追加します。`,
+        [
+          { text: "キャンセル", style: "cancel" },
+          { text: "連携する", onPress: () => void performAppleLogin() },
+        ],
+      );
+    else void performAppleLogin();
+  }
+  async function clearLocalSession() {
+    await SecureStore.deleteItemAsync("folio-token");
+    setToken("");
+    setUserEmail("");
+    setUserId("");
+    setData(initial);
+    setFiles([]);
+    setChosen([]);
+    setSelected(null);
+    setDeviceLogin(null);
+    setDriveConnected(false);
+    setMode("demo");
+  }
+  function deleteAccount() {
+    Alert.alert(
+      "アカウントを削除",
+      "Folioの作品・グループ・保存画像・ログイン情報を削除します。取り消せません。Google Driveの元ファイルは残ります。",
+      [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "削除する",
+          style: "destructive",
+          onPress: async () => {
+            setBusy(true);
+            setError("");
+            try {
+              await request("/account", {
+                method: "DELETE",
+                body: JSON.stringify({ confirmation: "DELETE" }),
+              });
+              await clearLocalSession();
+              setModal(null);
+            } catch (e) {
+              setError((e as Error).message);
+              setData({ groups: [], artworks: [] });
+            } finally {
+              setBusy(false);
+            }
+          },
+        },
+      ],
+    );
+  }
   const [userId, setUserId] = useState("");
   const [deviceLogin, setDeviceLogin] = useState<{
     deviceCode: string;
@@ -136,12 +247,28 @@ export default function App() {
   }, []);
   async function load() {
     try {
-      const me = await request<{ user: { id: string; email: string } | null }>(
-        "/auth/me",
-      );
+      const [me, appleStatus] = await Promise.all([
+        request<{
+          user: { id: string; email: string } | null;
+          deletionPending?: boolean;
+        }>("/auth/me"),
+        request<{ configured: boolean; linked?: boolean }>(
+          "/auth/apple/status",
+        ).catch(() => ({ configured: false, linked: false })),
+      ]);
+      setAppleConfigured(appleStatus.configured);
+      setAppleLinked(!!appleStatus.linked);
       if (!me.user) throw Error("ログインしてください");
       setUserEmail(me.user.email);
       setUserId(me.user.id);
+      if (me.deletionPending) {
+        setData({ groups: [], artworks: [] });
+        setDriveConnected(false);
+        setMode("live");
+        setModal("settings");
+        setError("アカウント削除を再試行してください");
+        return;
+      }
       const [library, driveStatus] = await Promise.all([
         request<Data>("/library"),
         request<{ connected: boolean }>("/drive/status"),
@@ -256,10 +383,22 @@ export default function App() {
       const s = await request<{ connected: boolean; configured: boolean }>(
         "/drive/status",
       );
-      if (!s.connected)
-        throw Error(
-          "WebからGoogle Driveを接続してから、この画面を再読み込みしてください。",
+      if (!s.connected) {
+        const connection = await request<{ url: string }>(
+          "/drive/native/start",
+          { method: "POST" },
         );
+        const result = await WebBrowser.openAuthSessionAsync(
+          connection.url,
+          "folio://drive",
+        );
+        if (result.type !== "success")
+          throw Error("Driveへの接続をキャンセルしました");
+        const status = await request<{ connected: boolean }>("/drive/status");
+        if (!status.connected)
+          throw Error("Driveへの接続を完了できませんでした");
+        setDriveConnected(true);
+      }
       const r = await request<{ files: typeof files; nextPageToken?: string }>(
         `/drive/files?${new URLSearchParams({
           ...(folderId ? { folder: folderId } : {}),
@@ -342,24 +481,45 @@ export default function App() {
         )}
         {modal === "settings" ? (
           <>
-            <Text style={[s.label, selected && s.viewerInfoMuted]}>
-              API URL
-            </Text>
-            <TextInput
-              style={[s.input, selected && s.viewerInfoInput]}
-              value={draftApi}
-              onChangeText={setDraftApi}
-              autoCapitalize="none"
-              keyboardType="url"
-            />
+            {__DEV__ && (
+              <>
+                <Text style={[s.label, selected && s.viewerInfoMuted]}>
+                  API URL
+                </Text>
+                <TextInput
+                  style={[s.input, selected && s.viewerInfoInput]}
+                  value={draftApi}
+                  onChangeText={setDraftApi}
+                  autoCapitalize="none"
+                  keyboardType="url"
+                />
+                <Text style={s.help}>
+                  実機ではPCのLAN IPアドレスまたはHTTPSのAPI
+                  URLを指定します。Androidエミュレーターは10.0.2.2を使用します。
+                </Text>
+              </>
+            )}
             <Text style={s.help}>
-              実機ではPCのLAN IPアドレスまたはHTTPSのAPI
-              URLを指定します。Androidエミュレーターは10.0.2.2を使用します。
+              {userEmail || "ログインしてライブラリを利用できます。"}
             </Text>
-            <Text style={s.help}>
-              {userEmail ||
-                "Googleアカウントでログインしてください。共通APIトークンは使用できません。"}
-            </Text>
+            {appleAvailable && appleConfigured && !appleLinked && (
+              <AppleAuthentication.AppleAuthenticationButton
+                buttonType={
+                  AppleAuthentication.AppleAuthenticationButtonType.CONTINUE
+                }
+                buttonStyle={
+                  AppleAuthentication.AppleAuthenticationButtonStyle.BLACK
+                }
+                cornerRadius={7}
+                style={{
+                  height: 48,
+                  width: "100%",
+                  marginVertical: 12,
+                  opacity: busy ? 0.5 : 1,
+                }}
+                onPress={appleLogin}
+              />
+            )}
             <Pressable
               style={[s.primary, selected && s.viewerInfoPrimary]}
               disabled={busy}
@@ -388,7 +548,28 @@ export default function App() {
                   setData(initial);
                   setSelected(null);
                   setDeviceLogin(login);
-                  await Linking.openURL(login.verificationUri);
+                  const result = await WebBrowser.openAuthSessionAsync(
+                    `${login.verificationUri}&native=1`,
+                    "folio://auth",
+                  );
+                  if (result.type === "success") {
+                    const response = await fetch(
+                      `${endpoint}/api/auth/device/token`,
+                      {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ deviceCode: login.deviceCode }),
+                        signal: AbortSignal.timeout(10000),
+                      },
+                    );
+                    const body = await response.json();
+                    if (!response.ok)
+                      throw Error(body.error || "ログインできませんでした");
+                    await SecureStore.setItemAsync("folio-token", body.token);
+                    setToken(body.token);
+                    setDeviceLogin(null);
+                    setModal(null);
+                  }
                 } catch (e) {
                   setError((e as Error).message);
                 } finally {
@@ -396,7 +577,7 @@ export default function App() {
                 }
               }}
             >
-              <Text style={s.primaryText}>ブラウザでGoogleログイン</Text>
+              <Text style={s.primaryText}>Googleでログイン</Text>
             </Pressable>
             {deviceLogin && (
               <>
@@ -438,33 +619,69 @@ export default function App() {
                 </Pressable>
               </>
             )}
-            {userEmail && (
+            <View
+              style={{
+                flexDirection: "row",
+                flexWrap: "wrap",
+                gap: 20,
+                paddingVertical: 16,
+              }}
+            >
               <Pressable
-                style={[s.primary, selected && s.viewerInfoPrimary]}
-                onPress={async () => {
-                  try {
-                    await request("/session", { method: "DELETE" });
-                    await SecureStore.deleteItemAsync("folio-token");
-                    setToken("");
-                    setUserEmail("");
-                    setData(initial);
-                    setFiles([]);
-                    setChosen([]);
-                    setSelected(null);
-                    setMode("demo");
-                  } catch (e) {
-                    setError((e as Error).message);
-                  }
-                }}
+                accessibilityRole="link"
+                onPress={() =>
+                  Linking.openURL(
+                    "https://folio-biti2v34ya-an.a.run.app/privacy.html",
+                  )
+                }
               >
-                <Text style={s.primaryText}>ログアウト</Text>
+                <Text style={{ fontSize: 12, color: "#637659" }}>
+                  プライバシー
+                </Text>
               </Pressable>
+              <Pressable
+                accessibilityRole="link"
+                onPress={() =>
+                  Linking.openURL(
+                    "https://folio-biti2v34ya-an.a.run.app/support.html",
+                  )
+                }
+              >
+                <Text style={{ fontSize: 12, color: "#637659" }}>サポート</Text>
+              </Pressable>
+            </View>
+            {userEmail && (
+              <>
+                <Pressable
+                  style={[s.primary, selected && s.viewerInfoPrimary]}
+                  onPress={async () => {
+                    try {
+                      await request("/session", { method: "DELETE" });
+                      await clearLocalSession();
+                    } catch (e) {
+                      setError((e as Error).message);
+                    }
+                  }}
+                >
+                  <Text style={s.primaryText}>ログアウト</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={busy}
+                  onPress={deleteAccount}
+                  style={{ paddingVertical: 18, opacity: busy ? 0.5 : 1 }}
+                >
+                  <Text style={{ color: "#9c4a3a", textAlign: "center" }}>
+                    アカウントを削除
+                  </Text>
+                </Pressable>
+              </>
             )}
           </>
         ) : modal === "drive" ? (
           <>
             <Text style={s.help}>
-              同じGoogleアカウントでWeb側に接続した、自分専用のDriveから画像を選べます。共有グループに取り込むと、その作品だけがメンバーに表示されます。
+              接続した自分のDriveから画像を選べます。共有グループに取り込んだ作品は、そのメンバーにも表示されます。
             </Text>
             <GroupPicker
               groups={data.groups}

@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { html } from "hono/html";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { createHash, randomBytes } from "node:crypto";
@@ -40,6 +41,9 @@ export async function verifyGoogleIdentity(
 export async function initializeAuth(db: Database) {
   await db.client.batch(
     [
+      "CREATE TABLE IF NOT EXISTS native_drive_tickets (hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires INTEGER NOT NULL,stage TEXT NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS native_auth_challenges (hash TEXT PRIMARY KEY, nonce TEXT NOT NULL, expires INTEGER NOT NULL)",
+      "CREATE TABLE IF NOT EXISTS apple_accounts (subject TEXT PRIMARY KEY, user_id TEXT NOT NULL, refresh_token TEXT NOT NULL)",
       "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL)",
       "CREATE TABLE IF NOT EXISTS user_sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires INTEGER NOT NULL)",
       "CREATE TABLE IF NOT EXISTS oauth_states (hash TEXT PRIMARY KEY, mode TEXT NOT NULL, user_id TEXT, nonce TEXT NOT NULL, verifier TEXT NOT NULL, expires INTEGER NOT NULL, return_device TEXT)",
@@ -157,9 +161,29 @@ export function setupAuth(
       "/api/drive/callback",
       "/api/auth/device/start",
       "/api/auth/device/token",
+      "/api/auth/apple/status",
+      "/api/auth/apple/challenge",
+      "/api/auth/apple",
+      "/api/drive/native",
+      "/api/drive/native/authorize",
     ];
     const identity = await resolve(c);
     if (identity) {
+      const deleting = await db
+        .query(
+          "SELECT user_id FROM account_deletions WHERE user_id=? AND expires=0",
+        )
+        .get(identity.user.id);
+      if (
+        deleting &&
+        ![
+          "/api/account",
+          "/api/auth/me",
+          "/api/session",
+          "/api/auth/device/approve",
+        ].includes(c.req.path)
+      )
+        return c.json({ error: "アカウントの削除を完了してください" }, 403);
       c.set("user", identity.user);
       c.set("sessionHash", identity.sessionHash);
     }
@@ -168,9 +192,40 @@ export function setupAuth(
     return next();
   });
   app.get("/api/auth/me", (c) =>
-    c.json({ user: c.get("user") ?? null, configured: configured() }),
+    (async () =>
+      c.json({
+        user: c.get("user") ?? null,
+        configured: configured(),
+        deletionPending: !!(
+          c.get("user") &&
+          (await db
+            .query(
+              "SELECT user_id FROM account_deletions WHERE user_id=? AND expires=0",
+            )
+            .get(c.get("user").id))
+        ),
+      }))(),
   );
-  async function begin(c: Context<AuthEnv>, mode: "login" | "drive") {
+  async function finishLogin(
+    c: Context<AuthEnv>,
+    userId: string,
+    returnDevice: unknown,
+  ) {
+    // Old workspace cookies have no authority; login always issues a new random session.
+    const old = c.get("sessionHash");
+    if (old) await db.query("DELETE FROM user_sessions WHERE hash=?").run(old);
+    sessionCookie(c, await issueSession(userId));
+    const [deviceCode, native] = String(returnDevice ?? "").split(".");
+    const device = deviceCode
+      ? `?device=${encodeURIComponent(deviceCode)}${native === "native" ? "&native=1" : ""}`
+      : "";
+    return c.redirect(`${origin}/${device}`);
+  }
+  async function begin(
+    c: Context<AuthEnv>,
+    mode: "login" | "drive",
+    nativeDrive = false,
+  ) {
     if (!configured())
       throw new HTTPException(503, {
         message: "Googleログインの設定が必要です",
@@ -192,7 +247,11 @@ export function setupAuth(
         nonce,
         verifier,
         Date.now() + 600_000,
-        device || null,
+        nativeDrive
+          ? "drive.native"
+          : device
+            ? `${device}${c.req.query("native") === "1" ? ".native" : ""}`
+            : null,
       );
     setCookie(c, "folio_oauth", state, {
       httpOnly: true,
@@ -218,12 +277,144 @@ export function setupAuth(
         ? {
             access_type: "offline",
             prompt: "consent",
-            login_hint: c.get("user").email,
+            ...(!c.get("user").id.startsWith("apple:")
+              ? { login_hint: c.get("user").email }
+              : {}),
           }
         : { prompt: "select_account" }),
     }).toString();
-    return mode === "login" ? c.redirect(url.href) : c.json({ url: url.href });
+    return mode === "login" || nativeDrive
+      ? c.redirect(url.href)
+      : c.json({ url: url.href });
   }
+  async function consumeDriveTicket(
+    token: string,
+    stage: string,
+  ): Promise<User> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HTTPException(400);
+    return db.transaction(async (tx) => {
+      const row = await tx
+        .query(
+          "SELECT u.id,u.email,u.name FROM native_drive_tickets t JOIN users u ON u.id=t.user_id WHERE t.hash=? AND t.stage=? AND t.expires>? AND NOT EXISTS(SELECT 1 FROM account_deletions d WHERE d.user_id=u.id AND d.expires=0)",
+        )
+        .get(hash(token), stage, Date.now());
+      if (!row)
+        throw new HTTPException(400, { message: "接続をやり直してください" });
+      await tx
+        .query("DELETE FROM native_drive_tickets WHERE hash=?")
+        .run(hash(token));
+      return {
+        id: String(row.id),
+        email: String(row.email),
+        name: String(row.name),
+      };
+    });
+  }
+  app.post("/api/drive/native/start", async (c) => {
+    if (!configured()) throw new HTTPException(503);
+    await db
+      .query("DELETE FROM native_drive_tickets WHERE expires<?")
+      .run(Date.now());
+    const ticket = random();
+    await db
+      .query(
+        "INSERT INTO native_drive_tickets(hash,user_id,expires,stage) VALUES(?,?,?,'start')",
+      )
+      .run(hash(ticket), c.get("user").id, Date.now() + 300_000);
+    return c.json({
+      url: `${process.env.API_ORIGIN ?? origin}/api/drive/native?ticket=${encodeURIComponent(ticket)}`,
+    });
+  });
+  app.get("/api/drive/native", async (c) => {
+    const user = await consumeDriveTicket(c.req.query("ticket") ?? "", "start"),
+      approval = random();
+    await db
+      .query(
+        "INSERT INTO native_drive_tickets(hash,user_id,expires,stage) VALUES(?,?,?,'approve')",
+      )
+      .run(hash(approval), user.id, Date.now() + 300_000);
+    setCookie(c, "folio_native_drive", approval, {
+      httpOnly: true,
+      secure: origin.startsWith("https:"),
+      sameSite: "Strict",
+      path: "/api",
+      maxAge: 300,
+    });
+    c.header(
+      "Content-Security-Policy",
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    return c.html(
+      html`<!doctype html>
+        <html lang="ja">
+          <head>
+            <meta charset="utf-8" />
+            <meta
+              name="viewport"
+              content="width=device-width,initial-scale=1"
+            />
+            <title>Google Driveを接続 | Folio</title>
+            <style>
+              body {
+                font: 16px/1.8 system-ui;
+                background: #f8faf5;
+                color: #30402a;
+                margin: 0;
+                padding: 40px 24px;
+              }
+              main {
+                max-width: 440px;
+                margin: 40px auto;
+              }
+              h1 {
+                font-size: 24px;
+              }
+              strong {
+                overflow-wrap: anywhere;
+              }
+              button {
+                width: 100%;
+                padding: 16px;
+                border: 0;
+                border-radius: 8px;
+                background: #3b5832;
+                color: white;
+                font: inherit;
+              }
+            </style>
+          </head>
+          <body>
+            <main>
+              <h1>Google Driveを接続</h1>
+              <p>接続先のFolioアカウント</p>
+              <p>
+                <strong>${user.name}<br />${user.email}</strong>
+              </p>
+              <p>
+                スマホに表示されるアカウントと一致することを確認してください。この後に選ぶGoogle
+                Driveを、このFolioアカウントに接続します。
+              </p>
+              <form method="post" action="/api/drive/native/authorize">
+                <input
+                  type="hidden"
+                  name="approval"
+                  value="${approval}"
+                /><button>このFolioアカウントに接続する</button>
+              </form>
+            </main>
+          </body>
+        </html>`,
+    );
+  });
+  app.post("/api/drive/native/authorize", async (c) => {
+    const cookie = getCookie(c, "folio_native_drive"),
+      body = await c.req.parseBody();
+    if (!cookie || body.approval !== cookie) throw new HTTPException(403);
+    const user = await consumeDriveTicket(cookie, "approve");
+    deleteCookie(c, "folio_native_drive", { path: "/api" });
+    c.set("user", user);
+    return begin(c, "drive", true);
+  });
   app.get("/api/auth/login", (c) => begin(c, "login"));
   app.get("/api/drive/connect", (c) => begin(c, "drive"));
   app.get("/api/drive/callback", async (c) => {
@@ -246,11 +437,27 @@ export function setupAuth(
       throw new HTTPException(400, { message: "認証リクエストが期限切れです" });
     if (
       stored.mode === "drive" &&
+      stored.return_device !== "drive.native" &&
       (!c.get("user") || c.get("user").id !== stored.user_id)
     )
       throw new HTTPException(403);
+    if (
+      stored.mode === "drive" &&
+      stored.return_device === "drive.native" &&
+      !(await db
+        .query(
+          "SELECT id FROM users WHERE id=? AND NOT EXISTS(SELECT 1 FROM account_deletions WHERE user_id=? AND expires=0)",
+        )
+        .get(String(stored.user_id), String(stored.user_id)))
+    )
+      throw new HTTPException(403);
     const code = c.req.query("code");
-    if (!code) return c.redirect(`${origin}/?auth=cancelled`);
+    if (!code)
+      return c.redirect(
+        stored.return_device === "drive.native"
+          ? "folio://drive?cancelled=1"
+          : `${origin}/?auth=cancelled`,
+      );
     const r = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       body: new URLSearchParams({
@@ -278,7 +485,10 @@ export function setupAuth(
       });
     }
     if (stored.mode === "drive") {
-      if (user.id !== stored.user_id)
+      if (
+        !String(stored.user_id).startsWith("apple:") &&
+        user.id !== stored.user_id
+      )
         throw new HTTPException(403, {
           message: "ログイン中と同じGoogleアカウントを選択してください",
         });
@@ -290,9 +500,38 @@ export function setupAuth(
         throw new HTTPException(400, {
           message: "Driveの読み取り権限が許可されませんでした",
         });
-      await options.saveDrive(user.id, tokens);
-      return c.redirect(`${origin}/?drive=connected`);
+      await options.saveDrive(String(stored.user_id), tokens);
+      return c.redirect(
+        stored.return_device === "drive.native"
+          ? "folio://drive"
+          : `${origin}/?drive=connected`,
+      );
     }
+    const deletion = await db
+      .query(
+        "SELECT expires FROM account_deletions WHERE user_id=? AND (expires=0 OR expires>?)",
+      )
+      .get(user.id, Date.now());
+    if (deletion) {
+      if (
+        Number(deletion.expires) === 0 &&
+        (await db.query("SELECT id FROM users WHERE id=?").get(user.id))
+      )
+        return finishLogin(c, user.id, stored.return_device);
+      throw new HTTPException(409, {
+        message:
+          "アカウントの削除処理中です。数分後にログインをやり直してください",
+      });
+    }
+    if (
+      await db
+        .query("SELECT id FROM users WHERE email=? AND id<>?")
+        .get(user.email, user.id)
+    )
+      throw new HTTPException(409, {
+        message:
+          "このメールは別のログイン方法で登録済みです。既存の方法でログインしてDriveを接続してください",
+      });
     await db
       .query(
         "INSERT INTO users(id,email,name) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name",
@@ -327,14 +566,7 @@ export function setupAuth(
           }),
         );
     }
-    // Old workspace cookies have no authority; login always issues a new random session.
-    const old = c.get("sessionHash");
-    if (old) await db.query("DELETE FROM user_sessions WHERE hash=?").run(old);
-    sessionCookie(c, await issueSession(user.id));
-    const device = stored.return_device
-      ? `?device=${encodeURIComponent(String(stored.return_device))}`
-      : "";
-    return c.redirect(`${origin}/${device}`);
+    return finishLogin(c, user.id, stored.return_device);
   });
   app.delete("/api/session", async (c) => {
     await db

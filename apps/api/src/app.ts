@@ -14,6 +14,8 @@ import {
   type ObjectStorage,
 } from "./uploads";
 import { hash } from "./auth";
+import { initializeDeletion, setupAccountDeletion } from "./account-deletion";
+import { setupAppleAuth, type AppleAuthHooks } from "./apple-auth";
 import { DriveCache } from "./drive-cache";
 import {
   initializeAuth,
@@ -29,6 +31,7 @@ type Options = {
   legacyOwnerEmail?: string;
   verifyIdentity?: typeof verifyGoogleIdentity;
   objectStorage?: ObjectStorage;
+  appleAuth?: AppleAuthHooks;
 };
 export async function createApp(options: Options = {}) {
   const db = await openDatabase(options.database);
@@ -38,6 +41,7 @@ export async function createApp(options: Options = {}) {
       "CREATE TABLE IF NOT EXISTS drive_upload_folders (user_id TEXT PRIMARY KEY, folder_id TEXT NOT NULL)",
     )
     .run();
+  await initializeDeletion(db);
   const objects = options.objectStorage ?? cloudStorage();
   let activeUploads = 0;
   const folderPending = new Map<string, Promise<string>>();
@@ -184,6 +188,17 @@ export async function createApp(options: Options = {}) {
     return task;
   }
   setupAuth(app, db, origin, configured, { ...options, saveDrive });
+  const apple = setupAppleAuth(app, db, {
+    encrypt,
+    decrypt,
+    hooks: options.appleAuth,
+  });
+  setupAccountDeletion(app, db, {
+    objects,
+    clear,
+    revokeApple: apple.revoke,
+    revokeDrive: disconnectDrive,
+  });
   async function googleToken(userId: string): Promise<string> {
     const encrypted = await secret(userId);
     if (!configured() || !encrypted)
@@ -285,8 +300,16 @@ export async function createApp(options: Options = {}) {
   ): Promise<Group> {
     const group =
       typeof id === "string" ? await get<Group>("group", id) : undefined;
+    const deletingOwner =
+      group &&
+      (await db
+        .query(
+          "SELECT user_id FROM account_deletions WHERE user_id=? AND expires=0",
+        )
+        .get(group.ownerId ?? ""));
     if (
       !group ||
+      deletingOwner ||
       (group.ownerId !== userId &&
         (write ||
           !(await db
@@ -566,9 +589,8 @@ export async function createApp(options: Options = {}) {
       connected: configured() && Boolean(await secret(c.get("user").id)),
     }),
   );
-  app.delete("/api/drive", async (c) => {
-    const userId = c.get("user").id,
-      encrypted = await secret(userId);
+  async function disconnectDrive(userId: string) {
+    const encrypted = await secret(userId);
     if (encrypted) {
       const tokens = JSON.parse(decrypt(String(encrypted)));
       const r = await fetch("https://oauth2.googleapis.com/revoke", {
@@ -586,6 +608,9 @@ export async function createApp(options: Options = {}) {
     }
     await db.query("DELETE FROM drive_credentials WHERE user_id=?").run(userId);
     clear(userId);
+  }
+  app.delete("/api/drive", async (c) => {
+    await disconnectDrive(c.get("user").id);
     return c.json({ connected: false });
   });
   app.get("/api/drive/files", async (c) => {

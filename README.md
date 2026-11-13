@@ -167,3 +167,11 @@ The API tests exercise cross-user isolation, group membership and revocation, re
 | DELETE         | `/api/drive`                        | Disconnect Drive                         |
 
 作品を開くと全画面ビューで表示します。詳細は右上の情報アイコンから半透明のパネルで開き、左右の矢印（Webでは矢印キーも利用可能）で作品を切り替えられます。画像コピーは詳細を開かずに実行できます。
+
+### Mobile store authentication and deletion
+
+The iOS app supports native Sign in with Apple and a platform authentication session for Google login. Apple identities are never merged with Google accounts based only on email; signed-in users can explicitly link Apple login from settings. Drive connection from the mobile app uses an explicit, one-time account confirmation before Google consent.
+
+`DELETE /api/account` with `{ "confirmation": "DELETE" }` deletes the authenticated account, its managed Storage objects, artwork/group records and sessions, and revokes external authorization. User-owned Drive files are preserved. Failed cleanup is retryable from mobile settings. In-flight writes are blocked by database guards during deletion.
+
+App Store privacy/support pages are served at `/privacy.html`, `/support.html` and `/delete-account.html`. Apple authentication needs `APPLE_CLIENT_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID` and the Secret Manager binding `APPLE_PRIVATE_KEY`; only the public identifiers belong in deployment configuration.

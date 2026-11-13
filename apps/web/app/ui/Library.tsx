@@ -105,6 +105,7 @@ export default function Library() {
   const [demoAllowed, setDemoAllowed] = useState(false);
   const [deviceCode, setDeviceCode] = useState("");
   const [deviceApproved, setDeviceApproved] = useState(false);
+  const [nativeDevice, setNativeDevice] = useState(false);
   const [data, setData] = useState<LibraryData>({ groups: [], artworks: [] });
   const [mode, setMode] = useState<"loading" | "live" | "demo">("loading");
   const [view, setView] = useState("all"),
@@ -162,6 +163,7 @@ export default function Library() {
       const identity = await request<{
         user: typeof user;
         configured: boolean;
+        deletionPending?: boolean;
       }>("/auth/me");
       setUser(identity.user);
       setConfigured(identity.configured);
@@ -173,6 +175,15 @@ export default function Library() {
         setData({ groups: [], artworks: [] });
         setConnected(false);
         setMode("demo");
+        return;
+      }
+      if (identity.deletionPending) {
+        setData({ groups: [], artworks: [] });
+        setConnected(false);
+        setMode("live");
+        setError(
+          "アカウントの削除処理中です。スマホアプリの設定から削除を再試行してください。",
+        );
         return;
       }
       const d = await request<LibraryData>("/library");
@@ -194,6 +205,9 @@ export default function Library() {
     const code =
       new URLSearchParams(window.location.search).get("device") ?? "";
     if (/^[A-F0-9]{12}$/.test(code)) setDeviceCode(code);
+    setNativeDevice(
+      new URLSearchParams(window.location.search).get("native") === "1",
+    );
     void load();
     const refresh = () => {
       if (document.visibilityState === "visible") void load();
@@ -439,7 +453,7 @@ export default function Library() {
         : view === "recent"
           ? "Recently added"
           : (activeGroup?.name ?? "All artworks");
-  const loginHref = `${apiBase()}/api/auth/login${deviceCode ? `?device=${deviceCode}` : ""}`;
+  const loginHref = `${apiBase()}/api/auth/login${deviceCode ? `?device=${deviceCode}${nativeDevice ? "&native=1" : ""}` : ""}`;
   if (!authReady || (!user && !demoAllowed))
     return (
       <main className="auth-page">
@@ -498,6 +512,7 @@ export default function Library() {
                   body: JSON.stringify({ userCode: deviceCode }),
                 });
                 setDeviceApproved(true);
+                if (nativeDevice) window.location.assign("folio://auth");
               } catch (e) {
                 notify((e as Error).message);
               }
