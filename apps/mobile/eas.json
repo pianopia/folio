@@ -17,7 +17,11 @@
   },
   "submit": {
     "production": {
-      "ios": {},
+      "ios": {
+        "appleId": "grandpianoaoa@gmail.com",
+        "appleTeamId": "G28EXCQ6J5",
+        "ascAppId": "6834296350"
+      },
       "android": {
         "track": "internal",
         "releaseStatus": "draft"

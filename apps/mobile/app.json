@@ -8,7 +8,9 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "studio.folio.app",
-      "buildNumber": "1"
+      "buildNumber": "1",
+      "appleTeamId": "G28EXCQ6J5",
+      "usesAppleSignIn": true
     },
     "android": {
       "package": "studio.folio.app",
@@ -29,7 +31,8 @@
           "microphonePermission": false
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-apple-authentication"
     ],
     "extra": {
       "eas": {
