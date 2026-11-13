@@ -7,11 +7,34 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "studio.folio.app"
+      "bundleIdentifier": "studio.folio.app",
+      "buildNumber": "1"
     },
     "android": {
-      "package": "studio.folio.app"
+      "package": "studio.folio.app",
+      "versionCode": 1
     },
-    "platforms": ["ios", "android"]
+    "platforms": [
+      "ios",
+      "android"
+    ],
+    "owner": "pianopia",
+    "icon": "./assets/icon.png",
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "作品としてアップロードする写真を選択するために使用します。",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
+      "expo-secure-store"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a543c297-2209-449f-9d4d-162524fa6300"
+      }
+    }
   }
 }
