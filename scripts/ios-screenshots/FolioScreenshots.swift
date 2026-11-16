@@ -11,7 +11,7 @@ final class FolioScreenshots: XCTestCase {
     }
 
     private func text(_ label: String) -> XCUIElement {
-        app.staticTexts[label].firstMatch
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
     }
 
     private func tap(_ label: String) {
@@ -43,7 +43,7 @@ final class FolioScreenshots: XCTestCase {
         capture("03-group")
 
         tap("すべて")
-        let artwork = app.images["Quiet forms"].firstMatch
+        let artwork = text("Quiet forms")
         XCTAssertTrue(artwork.waitForExistence(timeout: 20), app.debugDescription)
         if !artwork.isHittable { app.swipeUp() }
         artwork.tap()
