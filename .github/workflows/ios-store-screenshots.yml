@@ -1,0 +1,51 @@
+name: iOS Store Screenshots
+
+on:
+  push:
+    branches: ["codex/ios-store-screenshots-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.20
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies and generate the native project
+        run: |
+          bun install --frozen-lockfile
+          cd apps/mobile
+          bunx expo prebuild --platform ios --no-install
+          pod install --project-directory=ios
+      - name: Configure native screenshot tests
+        run: ruby scripts/ios-screenshots/configure.rb
+      - name: Compile the release app and screenshot runner
+        run: |
+          mkdir -p capture-output
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -workspace apps/mobile/ios/Folio.xcworkspace \
+            -scheme FolioScreenshots -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/folio-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            > capture-output/build.log 2>&1 || { tail -100 capture-output/build.log; exit 1; }
+      - name: Capture iPhone and iPad screens
+        env:
+          DERIVED_DATA: ${{ runner.temp }}/folio-derived
+        run: python3 scripts/ios-screenshots/run.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: folio-ios-native-screenshots
+          path: capture-output/
+          retention-days: 3
