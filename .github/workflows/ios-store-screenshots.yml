@@ -37,7 +37,7 @@ jobs:
             -scheme FolioScreenshots -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$RUNNER_TEMP/folio-derived" \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 \
             > capture-output/build.log 2>&1 || { tail -100 capture-output/build.log; exit 1; }
       - name: Capture iPhone and iPad screens
         env:
