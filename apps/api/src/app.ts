@@ -17,6 +17,7 @@ import { hash } from "./auth";
 import { initializeDeletion, setupAccountDeletion } from "./account-deletion";
 import { setupAppleAuth, type AppleAuthHooks } from "./apple-auth";
 import { DriveCache } from "./drive-cache";
+import { initializeContentSafety } from "./content-safety";
 import {
   initializeAuth,
   setupAuth,
@@ -42,6 +43,7 @@ export async function createApp(options: Options = {}) {
     )
     .run();
   await initializeDeletion(db);
+  await initializeContentSafety(db);
   const objects = options.objectStorage ?? cloudStorage();
   let activeUploads = 0;
   const folderPending = new Map<string, Promise<string>>();
@@ -310,6 +312,7 @@ export async function createApp(options: Options = {}) {
     if (
       !group ||
       deletingOwner ||
+      (await isBlocked(userId, group.ownerId ?? "")) ||
       (group.ownerId !== userId &&
         (write ||
           !(await db
@@ -323,7 +326,8 @@ export async function createApp(options: Options = {}) {
   }
   async function requireArtwork(userId: string, id: string, write = false) {
     const art = await get<Artwork>("art", id);
-    if (!art) throw new HTTPException(404, { message: "作品がありません" });
+    if (!art || (await isBlocked(userId, art.ownerId ?? "")))
+      throw new HTTPException(404, { message: "作品がありません" });
     await requireGroup(userId, art.groupId);
     if (write && art.ownerId !== userId) {
       const g = await get<Group>("group", art.groupId);
@@ -331,6 +335,11 @@ export async function createApp(options: Options = {}) {
         throw new HTTPException(403, { message: "閲覧のみのグループです" });
     }
     return art;
+  }
+  async function isBlocked(userId: string, ownerId: string) {
+    return !!(await db
+      .query("SELECT 1 FROM user_blocks WHERE blocker_id=? AND blocked_id=?")
+      .get(userId, ownerId));
   }
   app.get("/api/health", async (c) => {
     await db.query("SELECT 1 AS ok").get();
@@ -343,9 +352,9 @@ export async function createApp(options: Options = {}) {
     const userId = c.get("user").id;
     const rows = await db
       .query(
-        "SELECT data,kind FROM library_records WHERE group_id IN (SELECT id FROM library_records WHERE kind='group' AND owner_id=? UNION SELECT group_id FROM group_members WHERE user_id=?) ORDER BY rowid DESC",
+        "SELECT data,kind FROM library_records r WHERE NOT EXISTS(SELECT 1 FROM user_blocks WHERE blocker_id=? AND blocked_id=r.owner_id) AND group_id IN (SELECT g.id FROM library_records g WHERE g.kind='group' AND (g.owner_id=? OR EXISTS(SELECT 1 FROM group_members WHERE group_id=g.id AND user_id=?)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE blocker_id=? AND blocked_id=g.owner_id)) ORDER BY rowid DESC",
       )
-      .all(userId, userId);
+      .all(userId, userId, userId, userId);
     return c.json({
       groups: rows
         .filter((r) => r.kind === "group")
@@ -368,6 +377,88 @@ export async function createApp(options: Options = {}) {
       201,
     );
   });
+  app.post("/api/artworks/:id/reports", async (c) => {
+    const userId = c.get("user").id;
+    const art = await requireArtwork(userId, c.req.param("id"));
+    if (!art.ownerId || art.ownerId === userId)
+      throw new HTTPException(400, { message: "自分の作品は通報できません" });
+    const b = await parse(c);
+    if (
+      typeof b.reason !== "string" ||
+      !b.reason.trim() ||
+      b.reason.trim().length > 1000
+    )
+      throw new HTTPException(400, {
+        message: "通報理由は1〜1000文字で入力してください",
+      });
+    const id = crypto.randomUUID();
+    // Each submission is retained for review; reports never modify the artwork.
+    await db
+      .query(
+        "INSERT INTO content_reports(id,artwork_id,artwork_owner_id,reporter_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+      )
+      .run(
+        id,
+        art.id,
+        art.ownerId,
+        userId,
+        b.reason.trim(),
+        new Date().toISOString(),
+      );
+    return c.json({ id }, 201);
+  });
+  app.post("/api/users/:id/block", async (c) => {
+    const userId = c.get("user").id,
+      blockedId = c.req.param("id");
+    if (userId === blockedId)
+      throw new HTTPException(400, { message: "自分はブロックできません" });
+    const existing = await isBlocked(userId, blockedId);
+    // Only identities already visible through sharing can be targeted. Unrelated
+    // and unknown IDs both return 404, without providing a user lookup endpoint.
+    if (!existing) {
+      const visible = await db
+        .query(
+          "SELECT 1 FROM library_records r JOIN library_records g ON g.kind='group' AND g.id=r.group_id JOIN users u ON u.id=r.owner_id WHERE r.owner_id=? AND (g.owner_id=? OR EXISTS(SELECT 1 FROM group_members WHERE group_id=g.id AND user_id=?)) AND NOT EXISTS(SELECT 1 FROM user_blocks WHERE blocker_id=? AND blocked_id=g.owner_id) AND NOT EXISTS(SELECT 1 FROM account_deletions WHERE user_id=r.owner_id AND expires=0) LIMIT 1",
+        )
+        .get(blockedId, userId, userId, userId);
+      if (!visible)
+        throw new HTTPException(404, { message: "ユーザーがありません" });
+      await db
+        .query(
+          "INSERT OR IGNORE INTO user_blocks(blocker_id,blocked_id,created_at) VALUES(?,?,?)",
+        )
+        .run(userId, blockedId, new Date().toISOString());
+    }
+    return c.json({ blocked: true }, existing ? 200 : 201);
+  });
+  app.delete("/api/users/:id/block", async (c) => {
+    await db
+      .query("DELETE FROM user_blocks WHERE blocker_id=? AND blocked_id=?")
+      .run(c.get("user").id, c.req.param("id"));
+    return c.body(null, 204);
+  });
+  app.get("/api/blocks", async (c) => {
+    const users = await db
+      .query(
+        "SELECT u.id,u.email,u.name FROM users u JOIN user_blocks b ON b.blocked_id=u.id WHERE b.blocker_id=? ORDER BY b.created_at DESC",
+      )
+      .all(c.get("user").id);
+    return c.json({ users });
+  });
+  app.delete("/api/groups/:id/membership", async (c) => {
+    const userId = c.get("user").id,
+      id = c.req.param("id");
+    const g = await get<Group>("group", id);
+    if (g?.ownerId === userId)
+      throw new HTTPException(403, { message: "オーナーは退出できません" });
+    // Allow leaving even when the group's owner has already been blocked.
+    const result = await db
+      .query("DELETE FROM group_members WHERE group_id=? AND user_id=?")
+      .run(id, userId);
+    if (!result.rowsAffected)
+      throw new HTTPException(404, { message: "グループがありません" });
+    return c.body(null, 204);
+  });
   app.get("/api/groups/:id/members", async (c) => {
     const g = await requireGroup(c.get("user").id, c.req.param("id"), true);
     const members = await db
@@ -387,7 +478,7 @@ export async function createApp(options: Options = {}) {
       .get(email);
     if (!user)
       throw new HTTPException(400, {
-        message: "相手に先にFolioへGoogleログインしてもらってください",
+        message: "相手に先にFolioへログインしてもらってください",
       });
     if (user.id === g.ownerId)
       throw new HTTPException(400, {

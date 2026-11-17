@@ -7,6 +7,8 @@ import {
   SafeAreaView,
   StatusBar,
   StyleSheet,
+  KeyboardAvoidingView,
+  Platform,
   type ImageSourcePropType,
 } from "react-native";
 export default function ArtworkViewer({
@@ -20,6 +22,7 @@ export default function ArtworkViewer({
   onCopy,
   copying,
   feedback,
+  actions,
   children,
 }: {
   id: string;
@@ -32,6 +35,7 @@ export default function ArtworkViewer({
   onCopy: () => void;
   copying: boolean;
   feedback?: string;
+  actions?: ComponentProps<typeof View>["children"];
   children: ComponentProps<typeof SafeAreaView>["children"];
 }) {
   const [infoFor, setInfoFor] = useState<string | null>(null);
@@ -119,6 +123,14 @@ export default function ArtworkViewer({
           {children}
         </SafeAreaView>
       )}
+      {actions && (
+        <KeyboardAvoidingView
+          style={s.sharedActions}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          {actions}
+        </KeyboardAvoidingView>
+      )}
       {!!feedback && (
         <View style={s.feedback} pointerEvents="none">
           <Text accessibilityRole="alert" style={s.feedbackText}>
@@ -130,6 +142,13 @@ export default function ArtworkViewer({
   );
 }
 const s = StyleSheet.create({
+  sharedActions: {
+    position: "absolute",
+    bottom: 36,
+    left: 20,
+    right: 20,
+    zIndex: 4,
+  },
   viewer: { flex: 1, backgroundColor: "#090a0b" },
   controls: { position: "absolute", top: 0, left: 0, right: 0, zIndex: 4 },
   topbar: {

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   SafeAreaView,
   StatusBar,
@@ -17,6 +17,9 @@ import {
 } from "react-native";
 import ArtworkViewer from "./ArtworkViewer";
 import UploadImages from "./UploadImages";
+import Onboarding from "./Onboarding";
+import SharingSettings from "./SharingSettings";
+import SharedArtworkActions from "./SharedArtworkActions";
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
@@ -60,6 +63,8 @@ export default function App() {
     [folder, setFolder] = useState("");
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
+  const [onboarding, setOnboarding] = useState(false);
+  const [dismissingOnboarding, setDismissingOnboarding] = useState(false);
   useEffect(() => {
     if (!copyStatus) return;
     const timer = setTimeout(() => setCopyStatus(""), 3500);
@@ -217,33 +222,41 @@ export default function App() {
     userCode: string;
     verificationUri: string;
   } | null>(null);
-  async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const r = await fetch(`${api}/api${path}`, {
-      ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!r.ok) {
-      const b = await r.json().catch(() => ({}));
-      throw Error(b.error ?? `API error (${r.status})`);
-    }
-    return r.status === 204 ? (undefined as T) : r.json();
-  }
+  const request = useCallback(
+    async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
+      const r = await fetch(`${api}/api${path}`, {
+        ...init,
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        throw Error(b.error ?? `API error (${r.status})`);
+      }
+      return r.status === 204 ? (undefined as T) : r.json();
+    },
+    [api, token],
+  );
   useEffect(() => {
     (async () => {
-      const [a, t, d] = await Promise.all([
+      const [a, t, d, seen] = await Promise.all([
         AsyncStorage.getItem("folio-api"),
         SecureStore.getItemAsync("folio-token"),
         AsyncStorage.getItem("folio-demo"),
+        AsyncStorage.getItem("folio-onboarding-seen"),
       ]);
+      setOnboarding(!seen);
       if (a) setApi(a);
       if (t) setToken(t);
       if (d) setData(JSON.parse(d));
       setReady(true);
-    })().catch(() => setReady(true));
+    })().catch(() => {
+      setOnboarding(true);
+      setReady(true);
+    });
   }, []);
   async function load() {
     try {
@@ -305,6 +318,22 @@ export default function App() {
     setUrl("");
     setCollection("Unsorted");
     setTarget(group === "all" ? data.groups[0]?.id : group);
+  }
+  async function dismissOnboarding(settings: boolean) {
+    setDismissingOnboarding(true);
+    try {
+      await AsyncStorage.setItem("folio-onboarding-seen", "1");
+      setOnboarding(false);
+      if (settings) open("settings");
+    } catch {
+      Alert.alert("保存できませんでした", "もう一度お試しください。");
+    } finally {
+      setDismissingOnboarding(false);
+    }
+  }
+  async function refreshLibrary() {
+    setData(await request<Data>("/library"));
+    setGroup("all");
   }
   async function patch(a: Artwork, b: Partial<Artwork>) {
     try {
@@ -500,7 +529,8 @@ export default function App() {
               </>
             )}
             <Text style={s.help}>
-              {userEmail || "ログインしてライブラリを利用できます。"}
+              {userEmail ||
+                "AppleまたはGoogleでログインして、自分だけのクラウドライブラリを作成できます。サンプルはログインせずに利用できます。"}
             </Text>
             {appleAvailable && appleConfigured && !appleLinked && (
               <AppleAuthentication.AppleAuthenticationButton
@@ -652,6 +682,14 @@ export default function App() {
             </View>
             {userEmail && (
               <>
+                {mode === "live" && (
+                  <SharingSettings
+                    groups={data.groups}
+                    userId={userId}
+                    request={request}
+                    onChanged={refreshLibrary}
+                  />
+                )}
                 <Pressable
                   style={[s.primary, selected && s.viewerInfoPrimary]}
                   onPress={async () => {
@@ -1017,7 +1055,7 @@ export default function App() {
             </ScrollView>
             {mode === "demo" && (
               <Text style={s.demo}>
-                Demo mode · 変更はこの端末に保存されます
+                画像・作品を集めて整理するFolioのデモです。変更はこの端末のみ。ログインは設定から。
               </Text>
             )}
           </>
@@ -1109,15 +1147,21 @@ export default function App() {
         </Pressable>
       </View>
       <Modal
-        visible={!!modal || !!selected}
-        animationType={selected ? "fade" : "slide"}
-        presentationStyle={selected ? "fullScreen" : "pageSheet"}
+        visible={(ready && onboarding) || !!modal || !!selected}
+        animationType={onboarding || selected ? "fade" : "slide"}
+        presentationStyle={onboarding || selected ? "fullScreen" : "pageSheet"}
         onRequestClose={() => {
+          if (onboarding) return;
           setModal(null);
           setSelected(null);
         }}
       >
-        {selected ? (
+        {onboarding ? (
+          <Onboarding
+            busy={dismissingOnboarding}
+            onDismiss={(settings) => void dismissOnboarding(settings)}
+          />
+        ) : selected ? (
           <ArtworkViewer
             id={selected.id}
             title={selected.title}
@@ -1129,6 +1173,30 @@ export default function App() {
             onCopy={() => copyImage(selected)}
             copying={copyingId !== null}
             feedback={copyStatus}
+            actions={
+              mode === "live" &&
+              selected.ownerId &&
+              selected.ownerId !== userId ? (
+                <SharedArtworkActions
+                  key={selected.id}
+                  art={selected}
+                  request={request}
+                  onBlocked={async (ownerId) => {
+                    setSelected(null);
+                    setData((d) => ({
+                      groups: d.groups.filter((g) => g.ownerId !== ownerId),
+                      artworks: d.artworks.filter(
+                        (a) =>
+                          a.ownerId !== ownerId &&
+                          d.groups.find((g) => g.id === a.groupId)?.ownerId !==
+                            ownerId,
+                      ),
+                    }));
+                    await refreshLibrary();
+                  }}
+                />
+              ) : undefined
+            }
           >
             {modalContent}
           </ArtworkViewer>
@@ -1282,7 +1350,7 @@ const s = StyleSheet.create({
   },
   chipActive: { backgroundColor: "#e5eddc" },
   chipText: { fontSize: 10, color: "#7b8d6b" },
-  demo: { fontSize: 9, color: "#a1ad94", marginBottom: 15 },
+  demo: { fontSize: 11, lineHeight: 18, color: "#6f7c65", marginBottom: 15 },
   card: { flex: 1, maxWidth: "49%", position: "relative", marginBottom: 23 },
   image: { width: "100%", backgroundColor: "#e7edde", borderRadius: 8 },
   heart: {

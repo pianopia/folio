@@ -18,6 +18,7 @@ export default function ArtworkViewer({
   onCopy,
   copying = false,
   feedback,
+  actions,
   children,
 }: {
   art: Artwork;
@@ -28,6 +29,7 @@ export default function ArtworkViewer({
   onCopy: () => void;
   copying?: boolean;
   feedback?: string;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
@@ -114,6 +116,9 @@ export default function ArtworkViewer({
           </button>
         </div>
       </div>
+      {actions && (
+        <div className="artwork-viewer-shared-actions">{actions}</div>
+      )}
       <button
         type="button"
         className="viewer-icon artwork-viewer-prev"

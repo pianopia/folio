@@ -30,6 +30,7 @@ import {
 import ArtworkViewer from "./ArtworkViewer";
 import UploadPanel from "./UploadPanel";
 import GroupSharing from "./GroupSharing";
+import SharedArtworkActions from "./SharedArtworkActions";
 import type { Artwork } from "@folio/shared";
 import {
   request,
@@ -1103,7 +1104,16 @@ export default function Library() {
             </button>
           )}
           {error && <p className="error">{error}</p>}
-          {user && <GroupSharing groups={data.groups} userId={user.id} />}
+          {user && (
+            <GroupSharing
+              groups={data.groups}
+              userId={user.id}
+              onChanged={async () => {
+                setData(await request<LibraryData>("/library"));
+                setGroupId("all");
+              }}
+            />
+          )}
           <div className="connection-info">
             <DriveIcon />
             <span>
@@ -1271,6 +1281,33 @@ export default function Library() {
           onCopy={() => copyImage(selected)}
           copying={copyingId !== null}
           feedback={toast}
+          actions={
+            mode === "live" &&
+            user &&
+            selected.ownerId &&
+            selected.ownerId !== user.id ? (
+              <SharedArtworkActions
+                key={selected.id}
+                art={selected}
+                notify={notify}
+                onBlocked={async (ownerId) => {
+                  setSelected(null);
+                  clearDriveCaches();
+                  setData((d) => ({
+                    groups: d.groups.filter((g) => g.ownerId !== ownerId),
+                    artworks: d.artworks.filter(
+                      (a) =>
+                        a.ownerId !== ownerId &&
+                        d.groups.find((g) => g.id === a.groupId)?.ownerId !==
+                          ownerId,
+                    ),
+                  }));
+                  setGroupId("all");
+                  setData(await request<LibraryData>("/library"));
+                }}
+              />
+            ) : undefined
+          }
         >
           <form key={selected.id} onSubmit={(e) => submit(e, "edit")}>
             <span className="eyebrow">

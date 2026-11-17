@@ -2051,6 +2051,15 @@ main {
   gap: 10px;
   pointer-events: auto;
 }
+.artwork-viewer-shared-actions {
+  position: absolute;
+  z-index: 4;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+}
 .viewer-icon {
   display: grid;
   place-items: center;
