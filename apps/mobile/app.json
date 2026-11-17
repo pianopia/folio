@@ -8,7 +8,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "studio.folio.app",
-      "buildNumber": "1",
+      "buildNumber": "2",
       "appleTeamId": "G28EXCQ6J5",
       "usesAppleSignIn": true,
       "infoPlist": {
