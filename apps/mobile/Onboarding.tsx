@@ -28,8 +28,9 @@ export default function Onboarding({
         </Text>
         <Text style={s.heading}>自分だけのクラウドライブラリ</Text>
         <Text style={s.text}>
-          「設定」を開き、AppleまたはGoogleでログインしてください。画像は非公開のCloud
-          Storageに保存されます。Google Driveへの接続は任意です。
+          「設定」を開き、AppleまたはGoogleでログインしてください。ログイン後のアップロードは、Google
+          Drive未接続なら非公開のCloud
+          Storageへ、接続した場合は自分のDriveへ保存されます。Drive接続は任意です。
         </Text>
         <Text style={s.heading}>グループで共有する</Text>
         <Text style={s.text}>
