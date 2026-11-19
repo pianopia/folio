@@ -21,6 +21,8 @@ test("OAuth is state/nonce/PKCE bound, private to each account, and sharing only
   });
   let nonce = "",
     nextIdentity = alice,
+    expiresIn = 3600,
+    rejectRefresh = true,
     previewRequests: string[] = [],
     imageRequests: string[] = [],
     revoked: string[] = [];
@@ -29,12 +31,19 @@ test("OAuth is state/nonce/PKCE bound, private to each account, and sharing only
       auth = new Headers(init?.headers).get("Authorization") ?? "";
     if (url === "https://oauth2.googleapis.com/token") {
       const body = init?.body as URLSearchParams;
+      if (body.get("grant_type") === "refresh_token")
+        return rejectRefresh
+          ? Response.json({ error: "invalid_grant" }, { status: 400 })
+          : Response.json({
+              access_token: nextIdentity.id + "-access",
+              expires_in: 3600,
+            });
       expect(body.get("code_verifier")).toBeString();
       return Response.json({
         id_token: "signed-provider-token",
         access_token: nextIdentity.id + "-access",
         refresh_token: nextIdentity.id + "-refresh",
-        expires_in: 3600,
+        expires_in: expiresIn,
         scope:
           "openid email profile https://www.googleapis.com/auth/drive.readonly",
       });
@@ -142,8 +151,16 @@ test("OAuth is state/nonce/PKCE bound, private to each account, and sharing only
     );
     expect(encrypted).not.toContain("access");
     expect(encrypted).not.toContain("refresh");
-    expect((await (await a("/drive/status")).json()).connected).toBe(true);
-    expect((await (await b("/drive/status")).json()).connected).toBe(false);
+    expect(await (await a("/drive/status")).json()).toEqual({
+      configured: true,
+      connected: true,
+      reauthRequired: false,
+    });
+    expect(await (await b("/drive/status")).json()).toEqual({
+      configured: true,
+      connected: false,
+      reauthRequired: false,
+    });
     expect((await b("/drive/files")).status).toBe(409);
     expect((await b("/drive/image/same-file-id")).status).toBe(409);
     const list = await (await a("/drive/files")).json();
@@ -192,6 +209,7 @@ test("OAuth is state/nonce/PKCE bound, private to each account, and sharing only
         )
       ).status,
     ).toBe(403);
+    expiresIn = 0;
     const bobRequest = await begin(b);
     expect(
       (
@@ -203,6 +221,19 @@ test("OAuth is state/nonce/PKCE bound, private to each account, and sharing only
         )
       ).status,
     ).toBe(302);
+    const stale = await b("/drive/status");
+    expect(stale.status).toBe(200);
+    expect(await stale.json()).toEqual({
+      configured: true,
+      connected: true,
+      reauthRequired: true,
+    });
+    rejectRefresh = false;
+    expect(await (await b("/drive/status")).json()).toEqual({
+      configured: true,
+      connected: true,
+      reauthRequired: false,
+    });
     await b("/drive/files");
     expect(await (await b("/drive/thumbnail/same-file-id")).text()).toBe(
       "Bearer google-bob-access",

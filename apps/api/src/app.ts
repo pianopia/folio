@@ -208,8 +208,17 @@ export async function createApp(options: Options = {}) {
         message: "Google Driveを接続してください",
       });
     const tokens = JSON.parse(decrypt(String(encrypted)));
-    if (tokens.expiresAt > Date.now() + 60000) return tokens.access_token;
+    if (
+      tokens.expiresAt > Date.now() + 60000 &&
+      typeof tokens.access_token === "string" &&
+      tokens.access_token.trim()
+    )
+      return tokens.access_token;
     if (refreshing.has(userId)) return refreshing.get(userId)!;
+    if (typeof tokens.refresh_token !== "string" || !tokens.refresh_token.trim())
+      throw new HTTPException(409, {
+        message: "Google Driveの再接続が必要です",
+      });
     const task = (async () => {
       const r = await fetch("https://oauth2.googleapis.com/token", {
         method: "POST",
@@ -674,12 +683,21 @@ export async function createApp(options: Options = {}) {
       201,
     );
   });
-  app.get("/api/drive/status", async (c) =>
-    c.json({
-      configured: configured(),
-      connected: configured() && Boolean(await secret(c.get("user").id)),
-    }),
-  );
+  app.get("/api/drive/status", async (c) => {
+    const userId = c.get("user").id;
+    const driveConfigured = configured();
+    const connected = driveConfigured && Boolean(await secret(userId));
+    let reauthRequired = false;
+    if (connected) {
+      try {
+        await googleToken(userId);
+      } catch (e) {
+        if (!(e instanceof HTTPException) || e.status !== 409) throw e;
+        reauthRequired = true;
+      }
+    }
+    return c.json({ configured: driveConfigured, connected, reauthRequired });
+  });
   async function disconnectDrive(userId: string) {
     const encrypted = await secret(userId);
     if (encrypted) {

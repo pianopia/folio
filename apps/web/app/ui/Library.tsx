@@ -123,13 +123,19 @@ export default function Library() {
     [error, setError] = useState(""),
     [toast, setToast] = useState(""),
     [navOpen, setNavOpen] = useState(false);
-  const [connected, setConnected] = useState(false),
+  const [driveStatus, setDriveStatus] = useState<{
+    connected: boolean;
+    reauthRequired?: boolean;
+  } | null>(null),
     [configured, setConfigured] = useState(false),
     [files, setFiles] = useState<DriveFile[]>([]),
     [chosen, setChosen] = useState<string[]>([]),
     [folder, setFolder] = useState(""),
     [pageToken, setPageToken] = useState<string | undefined>(),
     [importGroup, setImportGroup] = useState("studio");
+  const connected = driveStatus?.connected ?? false;
+  const driveReauthRequired = driveStatus?.reauthRequired === true;
+  const driveAvailable = connected && !driveReauthRequired;
   const [copyingId, setCopyingId] = useState<string | null>(null);
   async function copyImage(art: Artwork) {
     if (copyingId) return;
@@ -174,27 +180,31 @@ export default function Library() {
       setSelected(null);
       if (!identity.user) {
         setData({ groups: [], artworks: [] });
-        setConnected(false);
+        setDriveStatus(null);
         setMode("demo");
         return;
       }
       if (identity.deletionPending) {
         setData({ groups: [], artworks: [] });
-        setConnected(false);
+        setDriveStatus(null);
         setMode("live");
         setError(
           "アカウントの削除処理中です。スマホアプリの設定から削除を再試行してください。",
         );
         return;
       }
-      const d = await request<LibraryData>("/library");
-      const status = await request<{ connected: boolean }>("/drive/status");
+      const [d, status] = await Promise.all([
+        request<LibraryData>("/library"),
+        request<NonNullable<typeof driveStatus>>("/drive/status").catch(
+          () => null,
+        ),
+      ]);
       setData(d);
       setMode("live");
-      setConnected(status.connected);
+      if (status) setDriveStatus(status);
     } catch (e) {
       setData({ groups: [], artworks: [] });
-      setConnected(false);
+      setDriveStatus(null);
       clearDriveCaches();
       setError((e as Error).message);
     } finally {
@@ -353,7 +363,7 @@ export default function Library() {
         : groupId,
     );
     setChosen([]);
-    if (connected) await driveFiles();
+    if (driveAvailable) await driveFiles();
   }
   async function connect() {
     setBusy(true);
@@ -618,7 +628,11 @@ export default function Library() {
               ひとつのクリエイティブな場所に。
             </p>
             <button onClick={openDrive}>
-              {connected ? "Driveを開く" : "Google Driveを接続"}
+              {driveReauthRequired
+                ? "Google Driveを再接続"
+                : connected
+                  ? "Driveを開く"
+                  : "Google Driveを接続"}
               <ArrowUpRight size={15} />
             </button>
           </div>
@@ -1091,7 +1105,7 @@ export default function Library() {
                   clearDriveCaches();
                   setData({ groups: [], artworks: [] });
                   setUser(null);
-                  setConnected(false);
+                  setDriveStatus(null);
                   setDemoAllowed(false);
                   setModal(null);
                   setMode("demo");
@@ -1119,11 +1133,13 @@ export default function Library() {
             <span>
               Google Drive
               <strong>
-                {connected
-                  ? "接続済み"
-                  : configured
-                    ? "接続できます"
-                    : "OAuth認証情報が未設定です"}
+                {driveReauthRequired
+                  ? "再接続が必要です"
+                  : connected
+                    ? "接続済み"
+                    : configured
+                      ? "接続できます"
+                      : "OAuth認証情報が未設定です"}
               </strong>
             </span>
             {connected && (
@@ -1132,7 +1148,7 @@ export default function Library() {
                 onClick={async () => {
                   try {
                     await request("/drive", { method: "DELETE" });
-                    setConnected(false);
+                    setDriveStatus(null);
                     clearDriveCaches();
                     notify("Driveの接続を解除しました");
                   } catch (e) {
@@ -1150,14 +1166,18 @@ export default function Library() {
         <Dialog
           title="Google Driveから取り込む"
           onClose={() => setModal(null)}
-          wide={connected}
+          wide={driveAvailable}
         >
-          {!connected ? (
+          {!driveAvailable ? (
             <div className="connect-panel">
               <div className="drive-large">
                 <DriveIcon />
               </div>
-              <h3>アイデアを、連れてこよう。</h3>
+              <h3>
+                {driveReauthRequired
+                  ? "Google Driveの再接続が必要です"
+                  : "アイデアを、連れてこよう。"}
+              </h3>
               <p>
                 Google Driveの画像を選んで、グループに整理。
                 <br />
@@ -1174,7 +1194,11 @@ export default function Library() {
                 onClick={connect}
                 disabled={busy || mode !== "live" || !configured}
               >
-                {busy ? "接続中…" : "Googleアカウントを接続"}
+                {busy
+                  ? "接続中…"
+                  : driveReauthRequired
+                    ? "Google Driveを再接続"
+                    : "Googleアカウントを接続"}
               </button>
               <small>
                 接続したDriveはあなただけが閲覧できます。グループに取り込んだ作品だけが、そのグループのメンバーに共有されます。

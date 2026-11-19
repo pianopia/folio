@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   SafeAreaView,
   StatusBar,
@@ -34,7 +34,18 @@ import {
 } from "@folio/shared";
 
 type Data = { artworks: Artwork[]; groups: Group[] };
+type DriveStatus = { connected: boolean; reauthRequired?: boolean };
 const initial = { artworks: initialArtworks, groups: initialGroups };
+const driveReauthMessage = "Google Driveの再接続が必要です";
+const thumbnailPath = (id: string, size = 512) =>
+  `/api/artworks/${encodeURIComponent(id)}/thumbnail?size=${size}`;
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 export default function App() {
   const [data, setData] = useState<Data>(initial),
     [api, setApi] = useState("https://folio-biti2v34ya-an.a.run.app"),
@@ -42,6 +53,8 @@ export default function App() {
     [ready, setReady] = useState(false),
     [mode, setMode] = useState("demo"),
     [driveConnected, setDriveConnected] = useState(false),
+    [driveReauth, setDriveReauth] = useState(""),
+    [driveImageRevision, setDriveImageRevision] = useState(0),
     [query, setQuery] = useState(""),
     [group, setGroup] = useState("all"),
     [tab, setTab] = useState("all"),
@@ -63,6 +76,7 @@ export default function App() {
     [folder, setFolder] = useState("");
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
+  const libraryLoadId = useRef(0);
   useEffect(() => {
     if (!copyStatus) return;
     const timer = setTimeout(() => setCopyStatus(""), 3500);
@@ -173,6 +187,7 @@ export default function App() {
   }
   async function clearLocalSession() {
     await SecureStore.deleteItemAsync("folio-token");
+    libraryLoadId.current++;
     setToken("");
     setUserEmail("");
     setUserId("");
@@ -182,6 +197,7 @@ export default function App() {
     setSelected(null);
     setDeviceLogin(null);
     setDriveConnected(false);
+    setDriveReauth("");
     setMode("demo");
   }
   function deleteAccount() {
@@ -232,7 +248,7 @@ export default function App() {
       });
       if (!r.ok) {
         const b = await r.json().catch(() => ({}));
-        throw Error(b.error ?? `API error (${r.status})`);
+        throw new ApiError(b.error ?? `API error (${r.status})`, r.status);
       }
       return r.status === 204 ? (undefined as T) : r.json();
     },
@@ -254,6 +270,7 @@ export default function App() {
     });
   }, []);
   async function load() {
+    const loadId = ++libraryLoadId.current;
     try {
       const [me, appleStatus] = await Promise.all([
         request<{
@@ -264,6 +281,7 @@ export default function App() {
           "/auth/apple/status",
         ).catch(() => ({ configured: false, linked: false })),
       ]);
+      if (loadId !== libraryLoadId.current) return;
       setAppleConfigured(appleStatus.configured);
       setAppleLinked(!!appleStatus.linked);
       if (!me.user) throw Error("ログインしてください");
@@ -272,21 +290,63 @@ export default function App() {
       if (me.deletionPending) {
         setData({ groups: [], artworks: [] });
         setDriveConnected(false);
+        setDriveReauth("");
         setMode("live");
         setModal("settings");
         setError("アカウント削除を再試行してください");
         return;
       }
-      const [library, driveStatus] = await Promise.all([
-        request<Data>("/library"),
-        request<{ connected: boolean }>("/drive/status"),
-      ]);
+      const statusRequest = request<DriveStatus>("/drive/status").catch(
+        () => undefined,
+      );
+      const library = await request<Data>("/library");
+      if (loadId !== libraryLoadId.current) return;
       setData(library);
-      setDriveConnected(driveStatus.connected);
       setMode("live");
+
+      const driveStatus = await statusRequest;
+      if (loadId !== libraryLoadId.current || !driveStatus) return;
+      setDriveConnected(driveStatus.connected);
+      if (!driveStatus.connected || driveStatus.reauthRequired === true) {
+        setDriveReauth(driveStatus.connected ? driveReauthMessage : "");
+        return;
+      }
+
+      // An owned Drive image tests the current account's credentials.
+      const ownerId = me.user.id;
+      const artwork =
+        library.artworks.find(
+          (a) => a.source === "drive" && a.ownerId === ownerId,
+        ) ??
+        library.artworks.find((a) => a.source !== "sample");
+      if (!artwork) return;
+      const response = await fetch(`${api}${thumbnailPath(artwork.id)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: abortSignalAfter(10000),
+      }).catch(() => undefined);
+      if (loadId !== libraryLoadId.current || !response) return;
+      if (
+        artwork.source === "drive" &&
+        artwork.ownerId &&
+        artwork.ownerId !== ownerId
+      )
+        return;
+      if (response.status === 409) {
+        const body = await response.json().catch(() => null);
+        if (loadId === libraryLoadId.current)
+          setDriveReauth(
+            typeof body?.error === "string" && body.error.trim()
+              ? body.error
+              : driveReauthMessage,
+          );
+      } else if (response.ok && artwork.source === "drive") {
+        setDriveReauth("");
+      }
     } catch {
+      if (loadId !== libraryLoadId.current) return;
       setData(initial);
       setDriveConnected(false);
+      setDriveReauth("");
       setSelected(null);
       setFiles([]);
       setChosen([]);
@@ -296,6 +356,9 @@ export default function App() {
   }
   useEffect(() => {
     if (ready) void load();
+    return () => {
+      libraryLoadId.current++;
+    };
   }, [ready, api, token]);
   async function update(d: Data) {
     setData(d);
@@ -388,28 +451,51 @@ export default function App() {
       setBusy(false);
     }
   }
-  async function drive(folderId = "", page?: string) {
+  async function connectDrive() {
+    const connection = await request<{ url: string }>("/drive/native/start", {
+      method: "POST",
+    });
+    const result = await WebBrowser.openAuthSessionAsync(
+      connection.url,
+      "folio://drive",
+    );
+    if (
+      result.type !== "success" ||
+      new URL(result.url).searchParams.has("cancelled")
+    )
+      throw Error("Driveへの接続をキャンセルしました");
+    const status = await request<DriveStatus>("/drive/status");
+    if (!status.connected || status.reauthRequired === true)
+      throw Error("Driveへの接続を完了できませんでした");
+    setDriveConnected(true);
+    setDriveReauth("");
+    await load();
+    // Remount Drive images so previously failed native requests are retried.
+    setDriveImageRevision((revision) => revision + 1);
+  }
+  async function reconnectDrive() {
+    if (busy) return;
     setBusy(true);
     setError("");
     try {
-      const s = await request<{ connected: boolean; configured: boolean }>(
-        "/drive/status",
-      );
-      if (!s.connected) {
-        const connection = await request<{ url: string }>(
-          "/drive/native/start",
-          { method: "POST" },
-        );
-        const result = await WebBrowser.openAuthSessionAsync(
-          connection.url,
-          "folio://drive",
-        );
-        if (result.type !== "success")
-          throw Error("Driveへの接続をキャンセルしました");
-        const status = await request<{ connected: boolean }>("/drive/status");
-        if (!status.connected)
-          throw Error("Driveへの接続を完了できませんでした");
-        setDriveConnected(true);
+      await connectDrive();
+    } catch (e) {
+      Alert.alert("Driveを再接続できませんでした", (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function drive(folderId = "", page?: string) {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (driveReauth) await connectDrive();
+      else {
+        const status = await request<DriveStatus>("/drive/status");
+        if (status.reauthRequired === true) setDriveReauth(driveReauthMessage);
+        if (!status.connected || status.reauthRequired === true)
+          await connectDrive();
       }
       const r = await request<{ files: typeof files; nextPageToken?: string }>(
         `/drive/files?${new URLSearchParams({
@@ -421,7 +507,9 @@ export default function App() {
       setFolder(folderId);
       setNextPage(r.nextPageToken);
     } catch (e) {
-      setError((e as Error).message);
+      if (e instanceof ApiError && e.status === 409)
+        setDriveReauth(e.message || driveReauthMessage);
+      else setError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -450,7 +538,7 @@ export default function App() {
   const picture = (a: Artwork, size = 512) => ({
     uri:
       a.source !== "sample"
-        ? `${api}/api/artworks/${encodeURIComponent(a.id)}/thumbnail?size=${size}`
+        ? `${api}${thumbnailPath(a.id, size)}`
         : a.url,
     headers:
       a.source !== "sample" && token
@@ -462,6 +550,21 @@ export default function App() {
     mode === "demo" ||
     data.groups.find((g) => g.id === selected.groupId)?.ownerId === userId;
   const [showUrlFields, setShowUrlFields] = useState(false);
+  const driveReauthNotice = driveReauth ? (
+    <View style={s.reauthNotice}>
+      <Text accessibilityRole="alert" style={s.reauthMessage}>
+        {driveReauth}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        disabled={busy}
+        style={[s.primary, s.reauthButton, busy && s.disabled]}
+        onPress={modal === "drive" ? () => void drive() : reconnectDrive}
+      >
+        <Text style={s.primaryText}>Google Driveを再接続</Text>
+      </Pressable>
+    </View>
+  ) : null;
   const modalContent = (
     <SafeAreaView style={[s.safe, selected && s.viewerInfoSafe]}>
       <ScrollView
@@ -515,6 +618,7 @@ export default function App() {
               {userEmail ||
                 "AppleまたはGoogleでログインして、自分だけのクラウドライブラリを作成できます。サンプルはログインせずに利用できます。"}
             </Text>
+            {driveReauthNotice}
             {appleAvailable && appleConfigured && !appleLinked && (
               <AppleAuthentication.AppleAuthenticationButton
                 buttonType={
@@ -701,6 +805,7 @@ export default function App() {
           </>
         ) : modal === "drive" ? (
           <>
+            {driveReauthNotice}
             <Text style={s.help}>
               接続した自分のDriveから画像を選べます。共有グループに取り込んだ作品は、そのメンバーにも表示されます。
             </Text>
@@ -976,7 +1081,8 @@ export default function App() {
         }}
         ListHeaderComponent={
           <>
-            {!driveConnected && (
+            {driveReauthNotice}
+            {!driveConnected && !driveReauth && (
               <View style={s.hero}>
                 <Text style={s.eyebrow}>A LITTLE SPACE FOR BIG IDEAS</Text>
                 <Text style={s.heroTitle}>
@@ -1055,6 +1161,7 @@ export default function App() {
               }}
             >
               <Image
+                key={a.source === "drive" ? driveImageRevision : undefined}
                 source={picture(a)}
                 style={[s.image, { height: index % 3 === 0 ? 230 : 190 }]}
                 accessibilityLabel={a.title}
@@ -1385,6 +1492,14 @@ const s = StyleSheet.create({
     marginTop: 23,
   },
   primaryText: { color: "#fff", fontSize: 12, fontWeight: "500" },
+  reauthNotice: {
+    backgroundColor: "#f9e9e1",
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+  },
+  reauthMessage: { color: "#794536", fontSize: 14, fontWeight: "600" },
+  reauthButton: { alignSelf: "flex-start", marginTop: 12 },
   detailImage: {
     width: "100%",
     height: 280,
