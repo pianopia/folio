@@ -46,6 +46,14 @@ class ApiError extends Error {
   }
 }
 
+function driveErrorMessage(error: unknown, fallback = "Driveへの接続に失敗しました") {
+  const message =
+    error instanceof Error && typeof error.message === "string"
+      ? error.message.trim()
+      : "";
+  return message || fallback;
+}
+
 export default function App() {
   const [data, setData] = useState<Data>(initial),
     [api, setApi] = useState("https://folio-biti2v34ya-an.a.run.app"),
@@ -247,8 +255,12 @@ export default function App() {
         signal: abortSignalAfter(10000),
       });
       if (!r.ok) {
-        const b = await r.json().catch(() => ({}));
-        throw new ApiError(b.error ?? `API error (${r.status})`, r.status);
+        const body = await r.json().catch(() => null);
+        const message = typeof body?.error === "string" ? body.error.trim() : "";
+        throw new ApiError(
+          message || "処理できませんでした。もう一度お試しください。",
+          r.status,
+        );
       }
       return r.status === 204 ? (undefined as T) : r.json();
     },
@@ -458,12 +470,15 @@ export default function App() {
     const result = await WebBrowser.openAuthSessionAsync(
       connection.url,
       "folio://drive",
-    );
-    if (
-      result.type !== "success" ||
-      new URL(result.url).searchParams.has("cancelled")
-    )
+    ).catch((e: unknown) => {
+      throw Error(driveErrorMessage(e));
+    });
+    const params =
+      result.type === "success" ? new URL(result.url).searchParams : null;
+    if (!params || params.has("cancelled"))
       throw Error("Driveへの接続をキャンセルしました");
+    if (params.has("error") || params.has("error_description"))
+      throw Error("Driveへの接続に失敗しました。接続をやり直してください");
     const status = await request<DriveStatus>("/drive/status");
     if (!status.connected || status.reauthRequired === true)
       throw Error("Driveへの接続を完了できませんでした");
@@ -480,7 +495,7 @@ export default function App() {
     try {
       await connectDrive();
     } catch (e) {
-      Alert.alert("Driveを再接続できませんでした", (e as Error).message);
+      Alert.alert("Driveを再接続できませんでした", driveErrorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -508,8 +523,8 @@ export default function App() {
       setNextPage(r.nextPageToken);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409)
-        setDriveReauth(e.message || driveReauthMessage);
-      else setError((e as Error).message);
+        setDriveReauth(driveErrorMessage(e, driveReauthMessage));
+      else setError(driveErrorMessage(e));
     } finally {
       setBusy(false);
     }

@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import { html } from "hono/html";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Database, SqlStore } from "./database";
@@ -9,6 +10,8 @@ export type User = { id: string; email: string; name: string };
 export type AuthEnv = { Variables: { user: User; sessionHash: string } };
 export const hash = (s: string) => createHash("sha256").update(s).digest("hex");
 const random = () => randomBytes(32).toString("base64url");
+const googleOAuthOrigin = "https://accounts.google.com";
+const reconnectDriveMessage = "接続をやり直してください";
 const keys = createRemoteJWKSet(
   new URL("https://www.googleapis.com/oauth2/v3/certs"),
 );
@@ -102,6 +105,91 @@ export async function migrateLegacy(
       .run(user.id);
   });
 }
+
+function driveAuthPage(
+  c: Context,
+  title: string,
+  content: ReturnType<typeof html>,
+  status: ContentfulStatusCode = 200,
+) {
+  const formAction = status === 200 ? `'self' ${googleOAuthOrigin}` : "'none'";
+  c.header("Cache-Control", "no-store");
+  c.header(
+    "Content-Security-Policy",
+    `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
+  );
+  return c.html(
+    html`<!doctype html>
+      <html lang="ja">
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width,initial-scale=1" />
+          <title>${title} | Folio</title>
+          <style>
+            body {
+              font: 16px/1.8 system-ui;
+              background: #f8faf5;
+              color: #30402a;
+              margin: 0;
+              padding: 40px 24px;
+            }
+            main {
+              max-width: 440px;
+              margin: 40px auto;
+            }
+            h1 {
+              font-size: 24px;
+            }
+            strong {
+              overflow-wrap: anywhere;
+            }
+            button {
+              width: 100%;
+              padding: 16px;
+              border: 0;
+              border-radius: 8px;
+              background: #3b5832;
+              color: white;
+              font: inherit;
+            }
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>${title}</h1>
+            ${content}
+          </main>
+        </body>
+      </html>`,
+    status,
+  );
+}
+
+export function browserAuthError(
+  c: Context,
+  message: string,
+  status: ContentfulStatusCode,
+) {
+  const { method, path } = c.req;
+  const isAuthPage =
+    (method === "GET" &&
+      (path === "/api/drive/native" || path === "/api/drive/callback")) ||
+    (method === "POST" && path === "/api/drive/native/authorize");
+  if (
+    !isAuthPage ||
+    /^Bearer\b/i.test(c.req.header("Authorization") ?? "") ||
+    /\bapplication\/json\b/i.test(c.req.header("Content-Type") ?? "") ||
+    /\bapplication\/json\b/i.test(c.req.header("Accept") ?? "")
+  )
+    return;
+  return driveAuthPage(
+    c,
+    "Google認証を完了できませんでした",
+    html`<p>${message}</p>`,
+    status,
+  );
+}
+
 export function setupAuth(
   app: Hono<AuthEnv>,
   db: Database,
@@ -153,7 +241,10 @@ export function setupAuth(
     c.header("Cache-Control", "no-store");
     const reqOrigin = c.req.header("Origin");
     if (reqOrigin && reqOrigin !== origin)
-      return c.json({ error: "Origin not allowed" }, 403);
+      return (
+        browserAuthError(c, reconnectDriveMessage, 403) ??
+        c.json({ error: "Origin not allowed" }, 403)
+      );
     const publicPaths = [
       "/api/health",
       "/api/auth/me",
@@ -182,8 +273,12 @@ export function setupAuth(
           "/api/session",
           "/api/auth/device/approve",
         ].includes(c.req.path)
-      )
-        return c.json({ error: "アカウントの削除を完了してください" }, 403);
+      ) {
+        const message = "アカウントの削除を完了してください";
+        return (
+          browserAuthError(c, message, 403) ?? c.json({ error: message }, 403)
+        );
+      }
       c.set("user", identity.user);
       c.set("sessionHash", identity.sessionHash);
     }
@@ -260,7 +355,7 @@ export function setupAuth(
       path: "/api",
       maxAge: 600,
     });
-    const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+    const url = new URL("/o/oauth2/v2/auth", googleOAuthOrigin);
     url.search = new URLSearchParams({
       client_id: process.env.GOOGLE_CLIENT_ID!,
       redirect_uri: callback,
@@ -283,9 +378,8 @@ export function setupAuth(
           }
         : { prompt: "select_account" }),
     }).toString();
-    return mode === "login" || nativeDrive
-      ? c.redirect(url.href)
-      : c.json({ url: url.href });
+    if (nativeDrive) return c.redirect(url.href, 303);
+    return mode === "login" ? c.redirect(url.href) : c.json({ url: url.href });
   }
   async function consumeDriveTicket(
     token: string,
@@ -299,7 +393,7 @@ export function setupAuth(
         )
         .get(hash(token), stage, Date.now());
       if (!row)
-        throw new HTTPException(400, { message: "接続をやり直してください" });
+        throw new HTTPException(400, { message: reconnectDriveMessage });
       await tx
         .query("DELETE FROM native_drive_tickets WHERE hash=?")
         .run(hash(token));
@@ -340,76 +434,28 @@ export function setupAuth(
       path: "/api",
       maxAge: 300,
     });
-    c.header(
-      "Content-Security-Policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-    );
-    return c.html(
-      html`<!doctype html>
-        <html lang="ja">
-          <head>
-            <meta charset="utf-8" />
-            <meta
-              name="viewport"
-              content="width=device-width,initial-scale=1"
-            />
-            <title>Google Driveを接続 | Folio</title>
-            <style>
-              body {
-                font: 16px/1.8 system-ui;
-                background: #f8faf5;
-                color: #30402a;
-                margin: 0;
-                padding: 40px 24px;
-              }
-              main {
-                max-width: 440px;
-                margin: 40px auto;
-              }
-              h1 {
-                font-size: 24px;
-              }
-              strong {
-                overflow-wrap: anywhere;
-              }
-              button {
-                width: 100%;
-                padding: 16px;
-                border: 0;
-                border-radius: 8px;
-                background: #3b5832;
-                color: white;
-                font: inherit;
-              }
-            </style>
-          </head>
-          <body>
-            <main>
-              <h1>Google Driveを接続</h1>
-              <p>接続先のFolioアカウント</p>
-              <p>
-                <strong>${user.name}<br />${user.email}</strong>
-              </p>
-              <p>
-                スマホに表示されるアカウントと一致することを確認してください。この後に選ぶGoogle
-                Driveを、このFolioアカウントに接続します。
-              </p>
-              <form method="post" action="/api/drive/native/authorize">
-                <input
-                  type="hidden"
-                  name="approval"
-                  value="${approval}"
-                /><button>このFolioアカウントに接続する</button>
-              </form>
-            </main>
-          </body>
-        </html>`,
+    return driveAuthPage(
+      c,
+      "Google Driveを接続",
+      html`<p>接続先のFolioアカウント</p>
+        <p>
+          <strong>${user.name}<br />${user.email}</strong>
+        </p>
+        <p>
+          スマホに表示されるアカウントと一致することを確認してください。この後に選ぶGoogle
+          Driveを、このFolioアカウントに接続します。
+        </p>
+        <form method="post" action="/api/drive/native/authorize">
+          <input type="hidden" name="approval" value="${approval}" />
+          <button>このFolioアカウントに接続する</button>
+        </form>`,
     );
   });
   app.post("/api/drive/native/authorize", async (c) => {
     const cookie = getCookie(c, "folio_native_drive"),
       body = await c.req.parseBody();
-    if (!cookie || body.approval !== cookie) throw new HTTPException(403);
+    if (!cookie || body.approval !== cookie)
+      throw new HTTPException(403, { message: reconnectDriveMessage });
     const user = await consumeDriveTicket(cookie, "approve");
     deleteCookie(c, "folio_native_drive", { path: "/api" });
     c.set("user", user);
@@ -440,7 +486,9 @@ export function setupAuth(
       stored.return_device !== "drive.native" &&
       (!c.get("user") || c.get("user").id !== stored.user_id)
     )
-      throw new HTTPException(403);
+      throw new HTTPException(403, {
+        message: "接続を開始したFolioアカウントでログインし直してください",
+      });
     if (
       stored.mode === "drive" &&
       stored.return_device === "drive.native" &&
@@ -450,7 +498,9 @@ export function setupAuth(
         )
         .get(String(stored.user_id), String(stored.user_id)))
     )
-      throw new HTTPException(403);
+      throw new HTTPException(403, {
+        message: "接続先のFolioアカウントを確認できませんでした。接続をやり直してください",
+      });
     const code = c.req.query("code");
     if (!code)
       return c.redirect(

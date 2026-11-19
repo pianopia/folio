@@ -84,25 +84,59 @@ test("native Drive tickets are single-use, cookie-bound, explicitly approved, fi
     const first = await start(a);
     expect(first.text).toContain(alice.email);
     expect(first.text).not.toContain(bob.email);
-    expect((await app.request(first.url)).status).toBe(400);
-    expect((await approve(first, "")).status).toBe(403);
+    expect(
+      first.page.headers.get("content-security-policy")?.split("; "),
+    ).toEqual([
+      "default-src 'none'",
+      "style-src 'unsafe-inline'",
+      "form-action 'self' https://accounts.google.com",
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+    ]);
+    const reused = await app.request(first.url);
+    expect(reused.status).toBe(400);
+    expect(reused.headers.get("content-type")).toContain("text/html");
+    expect(await reused.text()).toContain("接続をやり直してください");
+    for (const cookies of ["", "folio_native_drive=invalid"]) {
+      const rejected = await approve(first, cookies);
+      expect(rejected.status).toBe(403);
+      expect(rejected.headers.get("content-type")).toContain("text/html");
+      const body = await rejected.text();
+      expect(body).toContain("接続をやり直してください");
+      expect(body).not.toMatch(/"error"\s*:\s*""/);
+    }
+    const jsonRejection = await a("/drive/native/authorize", "POST", {});
+    expect(jsonRejection.status).toBe(403);
+    expect(await jsonRejection.json()).toEqual({
+      error: "接続をやり直してください",
+    });
+    const missingTicket = await app.request(origin + "/api/drive/native", {
+      headers: { Accept: "application/json" },
+    });
+    expect(missingTicket.status).toBe(400);
+    expect(await missingTicket.json()).toEqual({
+      error: "処理できませんでした。もう一度お試しください。",
+    });
     const consent = await approve(first);
-    expect(consent.status).toBe(302);
+    expect(consent.status).toBe(303);
     expect((await approve(first)).status).toBe(400);
     const google = new URL(consent.headers.get("location")!);
     expect(google.hostname).toBe("accounts.google.com");
     expect(google.searchParams.get("scope")).toContain("drive.file");
     const state = google.searchParams.get("state");
     const callback = origin + `/api/drive/callback?state=${state}&code=fixture`;
-    expect((await app.request(callback)).status).toBe(400);
+    const missingStateCookie = await app.request(callback);
+    expect(missingStateCookie.status).toBe(400);
+    expect(missingStateCookie.headers.get("content-type")).toContain("text/html");
+    expect(await missingStateCookie.text()).toContain("認証の状態が一致しません");
     identity = bob;
-    expect(
-      (
-        await app.request(callback, {
-          headers: { Cookie: cookie(consent, "folio_oauth") },
-        })
-      ).status,
-    ).toBe(403);
+    const wrongIdentity = await app.request(callback, {
+      headers: { Cookie: cookie(consent, "folio_oauth") },
+    });
+    expect(wrongIdentity.status).toBe(403);
+    expect(await wrongIdentity.text()).toContain(
+      "ログイン中と同じGoogleアカウントを選択してください",
+    );
     expect(
       await db
         .query("SELECT value FROM drive_credentials WHERE user_id=?")
@@ -131,10 +165,22 @@ test("native Drive tickets are single-use, cookie-bound, explicitly approved, fi
         .get(bob.id),
     ).toBeUndefined();
     const late = await start(a);
+    const pendingConsent = await approve(await start(a));
+    const pendingState = new URL(
+      pendingConsent.headers.get("location")!,
+    ).searchParams.get("state");
     await db
       .query("INSERT INTO account_deletions(user_id,expires) VALUES(?,0)")
       .run(alice.id);
     expect((await approve(late)).status).toBe(400);
+    const unavailableAccount = await app.request(
+      origin + `/api/drive/callback?state=${pendingState}&code=fixture`,
+      { headers: { Cookie: cookie(pendingConsent, "folio_oauth") } },
+    );
+    expect(unavailableAccount.status).toBe(403);
+    expect(await unavailableAccount.text()).toContain(
+      "接続先のFolioアカウントを確認できませんでした",
+    );
     identity = alice;
     const retryDevice = await (
       await client(app, "")("/auth/device/start", "POST")
@@ -142,6 +188,7 @@ test("native Drive tickets are single-use, cookie-bound, explicitly approved, fi
     const retryLogin = await app.request(
       origin + `/api/auth/login?device=${retryDevice.userCode}&native=1`,
     );
+    expect(retryLogin.status).toBe(302);
     const retryGoogle = new URL(retryLogin.headers.get("location")!);
     const retryCallback = await app.request(
       origin +

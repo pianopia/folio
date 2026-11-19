@@ -19,6 +19,7 @@ import { setupAppleAuth, type AppleAuthHooks } from "./apple-auth";
 import { DriveCache } from "./drive-cache";
 import { initializeContentSafety } from "./content-safety";
 import {
+  browserAuthError,
   initializeAuth,
   setupAuth,
   type AuthEnv,
@@ -65,18 +66,25 @@ export async function createApp(options: Options = {}) {
         c.req.path === "/api/artworks/upload" && c.req.method === "POST"
           ? MAX_UPLOAD_BYTES + 64 * 1024
           : 1024 * 1024,
-      onError: (c) => c.json({ error: "画像は1枚20MB以下にしてください" }, 413),
+      onError: (c) =>
+        browserAuthError(
+          c,
+          "リクエストが大きすぎます。接続をやり直してください。",
+          413,
+        ) ?? c.json({ error: "画像は1枚20MB以下にしてください" }, 413),
     })(c, next),
   );
   app.onError((e, c) => {
-    if (e instanceof HTTPException)
-      return c.json({ error: e.message }, e.status);
-    console.error(
-      e instanceof SyntaxError ? "Invalid JSON request" : "Request failed",
-    );
-    return c.json(
-      { error: "処理できませんでした。もう一度お試しください。" },
-      e instanceof SyntaxError ? 400 : 500,
+    const httpError = e instanceof HTTPException ? e : undefined;
+    const invalidJson = e instanceof SyntaxError;
+    const status = httpError?.status ?? (invalidJson ? 400 : 500);
+    const message =
+      httpError?.message?.trim() ||
+      "処理できませんでした。もう一度お試しください。";
+    if (!httpError)
+      console.error(invalidJson ? "Invalid JSON request" : "Request failed");
+    return (
+      browserAuthError(c, message, status) ?? c.json({ error: message }, status)
     );
   });
   const configured = () =>
