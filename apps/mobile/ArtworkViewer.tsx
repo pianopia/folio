@@ -1,5 +1,13 @@
-import React, { useState, type ComponentProps } from "react";
+import React, {
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from "react";
 import {
+  FlatList,
   View,
   Text,
   Image,
@@ -10,13 +18,116 @@ import {
   KeyboardAvoidingView,
   Platform,
   type ImageSourcePropType,
+  type LayoutChangeEvent,
+  type ListRenderItemInfo,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
-export default function ArtworkViewer({
-  id,
-  title,
-  source,
+
+type ArtworkPage = {
+  id: string;
+  title: string;
+  source: ImageSourcePropType;
+};
+
+function ArtworkPager({
+  pages,
   index,
-  count,
+  width,
+  height,
+  onNavigate,
+}: {
+  pages: ArtworkPage[];
+  index: number;
+  width: number;
+  height: number;
+  onNavigate: (index: number) => void;
+}) {
+  const list = useRef<FlatList<ArtworkPage>>(null);
+  const [initialIndex] = useState(index);
+  const pageIndex = useRef(index);
+  const userScroll = useRef(false);
+  const pageStyle = useMemo(() => ({ width, height }), [width, height]);
+  const renderPage = useCallback(
+    ({ item }: ListRenderItemInfo<ArtworkPage>) => (
+      <Image
+        source={item.source}
+        accessibilityLabel={item.title}
+        resizeMode="contain"
+        style={pageStyle}
+      />
+    ),
+    [pageStyle],
+  );
+
+  useLayoutEffect(() => {
+    if (pageIndex.current === index) return;
+    userScroll.current = false;
+    pageIndex.current = index;
+    list.current?.scrollToIndex({ index, animated: false });
+  }, [index]);
+
+  function settlePage(offset: number) {
+    // Programmatic jumps can also emit a momentum-end event on iOS.
+    if (!userScroll.current) return;
+    userScroll.current = false;
+    const next = Math.max(
+      0,
+      Math.min(pages.length - 1, Math.round(offset / width)),
+    );
+    if (next === pageIndex.current) return;
+    pageIndex.current = next;
+    onNavigate(next);
+  }
+
+  function onScrollEndDrag({
+    nativeEvent: { contentOffset, targetContentOffset },
+  }: NativeSyntheticEvent<NativeScrollEvent>) {
+    // A drag that stops on a page without coasting can finish here on iOS.
+    const pageOffset = Math.round(contentOffset.x / width) * width;
+    if (
+      targetContentOffset &&
+      Math.abs(targetContentOffset.x - pageOffset) < 0.5 &&
+      Math.abs(contentOffset.x - pageOffset) < 0.5
+    ) {
+      settlePage(contentOffset.x);
+    }
+  }
+
+  return (
+    <FlatList
+      ref={list}
+      data={pages}
+      horizontal
+      pagingEnabled
+      directionalLockEnabled
+      pinchGestureEnabled={false}
+      bounces={false}
+      overScrollMode="never"
+      showsHorizontalScrollIndicator={false}
+      automaticallyAdjustContentInsets={false}
+      style={StyleSheet.absoluteFillObject}
+      keyExtractor={(page) => page.id}
+      initialScrollIndex={initialIndex}
+      initialNumToRender={3}
+      windowSize={5}
+      getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
+      renderItem={renderPage}
+      onScrollBeginDrag={() => {
+        userScroll.current = true;
+      }}
+      onScrollEndDrag={onScrollEndDrag}
+      onMomentumScrollEnd={({ nativeEvent }) =>
+        settlePage(nativeEvent.contentOffset.x)
+      }
+    />
+  );
+}
+
+export default function ArtworkViewer({
+  artwork,
+  pages,
+  index,
   onNavigate,
   onClose,
   onCopy,
@@ -25,12 +136,10 @@ export default function ArtworkViewer({
   actions,
   children,
 }: {
-  id: string;
-  title: string;
-  source: ImageSourcePropType;
+  artwork: ArtworkPage;
+  pages: ArtworkPage[];
   index: number;
-  count: number;
-  onNavigate: (direction: number) => void;
+  onNavigate: (index: number) => void;
   onClose: () => void;
   onCopy: () => void;
   copying: boolean;
@@ -39,33 +148,58 @@ export default function ArtworkViewer({
   children: ComponentProps<typeof SafeAreaView>["children"];
 }) {
   const [infoFor, setInfoFor] = useState<string | null>(null);
-  const showInfo = infoFor === id;
-  function navigate(direction: number) {
-    if (count < 2) return;
-    setInfoFor(null);
-    onNavigate(direction);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const showInfo = infoFor === artwork.id;
+  const count = pages.length;
+  const canNavigate = index >= 0 && count > 1;
+
+  function onLayout({
+    nativeEvent: { layout: { width, height } },
+  }: LayoutChangeEvent) {
+    setSize((current) =>
+      current.width === width && current.height === height
+        ? current
+        : { width, height },
+    );
   }
+
+  function navigate(next: number) {
+    setInfoFor(null);
+    onNavigate(next);
+  }
+
   return (
-    <View style={s.viewer}>
+    <View style={s.viewer} onLayout={onLayout}>
       <StatusBar barStyle="light-content" />
-      <Image
-        key={id}
-        source={source}
-        accessibilityLabel={title}
-        resizeMode="contain"
-        style={StyleSheet.absoluteFillObject}
-      />
+      {canNavigate && size.width > 0 && size.height > 0 ? (
+        <ArtworkPager
+          key={size.width}
+          pages={pages}
+          index={index}
+          width={size.width}
+          height={size.height}
+          onNavigate={navigate}
+        />
+      ) : (
+        <Image
+          key={artwork.id}
+          source={artwork.source}
+          accessibilityLabel={artwork.title}
+          resizeMode="contain"
+          style={StyleSheet.absoluteFillObject}
+        />
+      )}
       <SafeAreaView style={s.controls} pointerEvents="box-none">
         <View style={s.topbar} pointerEvents="box-none">
           <Text style={s.counter}>
             {index + 1} / {count}
           </Text>
-          <View style={s.tools}>
+          <View style={s.tools} pointerEvents="box-none">
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="作品の詳細情報"
               accessibilityState={{ expanded: showInfo }}
-              onPress={() => setInfoFor(showInfo ? null : id)}
+              onPress={() => setInfoFor(showInfo ? null : artwork.id)}
               style={[s.icon, showInfo && s.active]}
             >
               <Text style={s.iconText}>ⓘ</Text>
@@ -93,18 +227,18 @@ export default function ArtworkViewer({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="前の作品"
-        disabled={count < 2}
-        onPress={() => navigate(-1)}
-        style={[s.arrow, s.previous, count < 2 && s.disabled]}
+        disabled={!canNavigate}
+        onPress={() => navigate((index - 1 + count) % count)}
+        style={[s.arrow, s.previous, !canNavigate && s.disabled]}
       >
         <Text style={s.arrowText}>‹</Text>
       </Pressable>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="次の作品"
-        disabled={count < 2}
-        onPress={() => navigate(1)}
-        style={[s.arrow, s.next, count < 2 && s.disabled]}
+        disabled={!canNavigate}
+        onPress={() => navigate((index + 1) % count)}
+        style={[s.arrow, s.next, !canNavigate && s.disabled]}
       >
         <Text style={s.arrowText}>›</Text>
       </Pressable>
@@ -127,6 +261,7 @@ export default function ArtworkViewer({
         <KeyboardAvoidingView
           style={s.sharedActions}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
+          pointerEvents="box-none"
         >
           {actions}
         </KeyboardAvoidingView>

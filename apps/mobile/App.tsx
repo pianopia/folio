@@ -540,10 +540,9 @@ export default function App() {
   const selectedIndex = selected
     ? artworks.findIndex((a) => a.id === selected.id)
     : -1;
-  function navigateArtwork(direction: number) {
-    if (selectedIndex < 0 || artworks.length < 2) return;
-    const next =
-      artworks[(selectedIndex + direction + artworks.length) % artworks.length];
+  function navigateArtwork(index: number) {
+    const next = artworks[index];
+    if (!next) return;
     setSelected(next);
     setTitle(next.title);
     setTarget(next.groupId);
@@ -1166,15 +1165,7 @@ export default function App() {
         }
         renderItem={({ item: a, index }) => (
           <View style={s.card}>
-            <Pressable
-              onPress={() => {
-                setSelected(a);
-                setTitle(a.title);
-                setTarget(a.groupId);
-                setCollection(a.collection);
-                setError("");
-              }}
-            >
+            <Pressable onPress={() => navigateArtwork(index)}>
               <Image
                 key={a.source === "drive" ? driveImageRevision : undefined}
                 source={picture(a)}
@@ -1262,11 +1253,17 @@ export default function App() {
       >
         {selected ? (
           <ArtworkViewer
-            id={selected.id}
-            title={selected.title}
-            source={picture(selected, 1024)}
+            artwork={{
+              id: selected.id,
+              title: selected.title,
+              source: picture(selected, 1024),
+            }}
+            pages={artworks.map((artwork) => ({
+              id: artwork.id,
+              title: artwork.title,
+              source: picture(artwork, 1024),
+            }))}
             index={selectedIndex}
-            count={artworks.length}
             onNavigate={navigateArtwork}
             onClose={() => setSelected(null)}
             onCopy={() => copyImage(selected)}
