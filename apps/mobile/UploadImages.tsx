@@ -13,6 +13,8 @@ import {
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import type { Artwork, Group } from "@folio/shared";
+import { abortSignalAfter } from "./abort-signal";
+
 export default function UploadImages({
   api,
   token,
@@ -130,7 +132,7 @@ export default function UploadImages({
             method: "POST",
             headers: { Authorization: `Bearer ${token}` },
             body: form,
-            signal: AbortSignal.timeout(100000),
+            signal: abortSignalAfter(100000),
           });
           const body = await response.json();
           if (!response.ok)

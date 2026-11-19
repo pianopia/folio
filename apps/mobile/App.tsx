@@ -17,9 +17,9 @@ import {
 } from "react-native";
 import ArtworkViewer from "./ArtworkViewer";
 import UploadImages from "./UploadImages";
-import Onboarding from "./Onboarding";
 import SharingSettings from "./SharingSettings";
 import SharedArtworkActions from "./SharedArtworkActions";
+import { abortSignalAfter } from "./abort-signal";
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
@@ -63,8 +63,6 @@ export default function App() {
     [folder, setFolder] = useState("");
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
-  const [onboarding, setOnboarding] = useState(false);
-  const [dismissingOnboarding, setDismissingOnboarding] = useState(false);
   useEffect(() => {
     if (!copyStatus) return;
     const timer = setTimeout(() => setCopyStatus(""), 3500);
@@ -77,7 +75,7 @@ export default function App() {
       const isDrive = art.source !== "sample";
       const response = await fetch(isDrive ? `${api}${art.url}` : art.url, {
         headers: isDrive && token ? { Authorization: `Bearer ${token}` } : {},
-        signal: AbortSignal.timeout(30000),
+        signal: abortSignalAfter(30000),
       });
       if (!response.ok) throw Error("画像を取得できませんでした。");
       const blob = await response.blob();
@@ -230,7 +228,7 @@ export default function App() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        signal: AbortSignal.timeout(10000),
+        signal: abortSignalAfter(10000),
       });
       if (!r.ok) {
         const b = await r.json().catch(() => ({}));
@@ -242,19 +240,16 @@ export default function App() {
   );
   useEffect(() => {
     (async () => {
-      const [a, t, d, seen] = await Promise.all([
+      const [a, t, d] = await Promise.all([
         AsyncStorage.getItem("folio-api"),
         SecureStore.getItemAsync("folio-token"),
         AsyncStorage.getItem("folio-demo"),
-        AsyncStorage.getItem("folio-onboarding-seen"),
       ]);
-      setOnboarding(!seen);
       if (a) setApi(a);
       if (t) setToken(t);
       if (d) setData(JSON.parse(d));
       setReady(true);
     })().catch(() => {
-      setOnboarding(true);
       setReady(true);
     });
   }, []);
@@ -318,18 +313,6 @@ export default function App() {
     setUrl("");
     setCollection("Unsorted");
     setTarget(group === "all" ? data.groups[0]?.id : group);
-  }
-  async function dismissOnboarding(settings: boolean) {
-    setDismissingOnboarding(true);
-    try {
-      await AsyncStorage.setItem("folio-onboarding-seen", "1");
-      setOnboarding(false);
-      if (settings) open("settings");
-    } catch {
-      Alert.alert("保存できませんでした", "もう一度お試しください。");
-    } finally {
-      setDismissingOnboarding(false);
-    }
   }
   async function refreshLibrary() {
     setData(await request<Data>("/library"));
@@ -589,7 +572,7 @@ export default function App() {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ deviceCode: login.deviceCode }),
-                        signal: AbortSignal.timeout(10000),
+                        signal: abortSignalAfter(10000),
                       },
                     );
                     const body = await response.json();
@@ -1147,21 +1130,15 @@ export default function App() {
         </Pressable>
       </View>
       <Modal
-        visible={(ready && onboarding) || !!modal || !!selected}
-        animationType={onboarding || selected ? "fade" : "slide"}
-        presentationStyle={onboarding || selected ? "fullScreen" : "pageSheet"}
+        visible={!!modal || !!selected}
+        animationType={selected ? "fade" : "slide"}
+        presentationStyle={selected ? "fullScreen" : "pageSheet"}
         onRequestClose={() => {
-          if (onboarding) return;
           setModal(null);
           setSelected(null);
         }}
       >
-        {onboarding ? (
-          <Onboarding
-            busy={dismissingOnboarding}
-            onDismiss={(settings) => void dismissOnboarding(settings)}
-          />
-        ) : selected ? (
+        {selected ? (
           <ArtworkViewer
             id={selected.id}
             title={selected.title}
