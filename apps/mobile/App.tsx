@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import ArtworkViewer from "./ArtworkViewer";
 import UploadImages from "./UploadImages";
+import BurstCamera from "./BurstCamera";
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
@@ -60,6 +61,7 @@ export default function App() {
     [folder, setFolder] = useState("");
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
+  const [burstOpen, setBurstOpen] = useState(false);
   useEffect(() => {
     if (!copyStatus) return;
     const timer = setTimeout(() => setCopyStatus(""), 3500);
@@ -742,6 +744,15 @@ export default function App() {
         ) : (
           <>
             {modal === "add" && mode === "live" && (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => { setModal(null); setBurstOpen(true); }}
+                style={[s.primary, { marginTop: 8, marginBottom: 12 }]}
+              >
+                <Text style={s.primaryText}>撮影モード（連続撮影して自動保存）</Text>
+              </Pressable>
+            )}
+            {modal === "add" && mode === "live" && (
               <UploadImages
                 api={api}
                 token={token}
@@ -1136,6 +1147,13 @@ export default function App() {
           modalContent
         )}
       </Modal>
+      {burstOpen && <BurstCamera
+        api={api}
+        token={token}
+        groups={data.groups.filter((g) => g.ownerId === userId)}
+        onUploaded={(art) => setData((d) => ({ artworks: [art, ...d.artworks.filter((a) => a.id !== art.id)], groups: d.groups }))}
+        onClose={() => setBurstOpen(false)}
+      />}
     </SafeAreaView>
   );
 }

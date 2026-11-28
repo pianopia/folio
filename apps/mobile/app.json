@@ -24,6 +24,14 @@
     "icon": "./assets/icon.png",
     "plugins": [
       [
+        "expo-camera",
+        {
+          "cameraPermission": "撮影モードで写真を撮影し、選択した保存先に保存するために使用します。",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      [
         "expo-image-picker",
         {
           "photosPermission": "作品としてアップロードする写真を選択するために使用します。",
