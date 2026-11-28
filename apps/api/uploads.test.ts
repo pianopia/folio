@@ -9,7 +9,7 @@ const origin = "https://folio.example";
 function memoryStorage() {
   const data = new Map<string, { bytes: Uint8Array; type: string }>();
   const sessions = new Map<string, string>();
-  let sessionNumber = 0;
+  let sessionNumber = 0, streamOpens = 0;
   const backend: ObjectStorage = {
     async save(key, bytes, type) {
       data.set(key, { bytes, type });
@@ -32,12 +32,13 @@ function memoryStorage() {
       return { size: item.bytes.byteLength, contentType: item.type };
     },
     openRead(key) {
+      streamOpens++;
       const item = data.get(key);
       if (!item) throw Error("not found");
       return Readable.from([item.bytes]);
     },
   };
-  return { backend, data, sessions, uploadSession(url: string, bytes: Uint8Array, type = "image/jpeg") {
+  return { backend, data, sessions, get streamOpens() { return streamOpens; }, uploadSession(url: string, bytes: Uint8Array, type = "image/jpeg") {
     const key = sessions.get(url);
     if (!key) throw Error("unknown session");
     data.set(key, { bytes, type });
@@ -220,6 +221,7 @@ test("direct upload validates init, streams finalization, and is idempotent", as
     store.uploadSession(session.uploadUrl, original, "image/png");
     const completed = await a(`/uploads/${session.uploadId}/complete`, "POST", {});
     expect(completed.status).toBe(201);
+    expect(store.streamOpens).toBe(1);
     const art = await completed.json();
     expect(art.source).toBe("storage"); expect(art.contentType).toBe("image/png");
     expect(store.data.size).toBe(3);
@@ -379,7 +381,7 @@ test("direct upload creates and finalizes a Drive resumable session with mocked 
     }
     if (url === "https://drive-session.example/upload") return Response.json({ id: "direct-drive-file" });
     if (url.startsWith("https://www.googleapis.com/drive/v3/files/direct-drive-file?fields=")) return Response.json({ id: "direct-drive-file", name: "texture.png", size: String(image.byteLength), mimeType: "image/png", parents: ["drive-folder"], imageMediaMetadata: { width: 64, height: 48 } });
-    if (url === "https://www.googleapis.com/drive/v3/files/direct-drive-file/?alt=media") return new Response(image, { headers: { "Content-Type": "image/png" } });
+    if (url === "https://www.googleapis.com/drive/v3/files/direct-drive-file?alt=media") return new Response(image, { headers: { "Content-Type": "image/png" } });
     throw Error(`Unexpected Drive request: ${url}`);
   }) as typeof fetch;
   const { app, db } = await createApp({ database: ":memory:", webOrigin: origin, objectStorage: memoryStorage().backend });
@@ -396,7 +398,7 @@ test("direct upload creates and finalizes a Drive resumable session with mocked 
     expect(completed.status).toBe(201);
     expect(await completed.json()).toMatchObject({ source: "drive", driveId: "direct-drive-file", groupId: group.id });
     expect(calls.some((call) => call.includes("uploadType=resumable"))).toBe(true);
-    expect(calls.some((call) => call.includes("alt=media"))).toBe(true);
+    expect(calls).toContain("GET https://www.googleapis.com/drive/v3/files/direct-drive-file?alt=media");
   } finally {
     db.close(); globalThis.fetch = originalFetch;
     for (const key of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "TOKEN_ENCRYPTION_KEY"]) {

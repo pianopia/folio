@@ -118,10 +118,10 @@ export function cloudStorage(
 /**
  * Validate/thumbnail a direct-upload original without buffering the original.
  * JPEG is allowed to 64 MP because libvips can shrink JPEGs during decode before
- * creating the tiny previews. PNG/WebP/GIF stay at 32 MP: their full raster can
+ * creating the tiny previews. PNG/WebP/GIF stay at 16 MP: their full raster can
  * require ~64 MiB at 16 MP (RGBA), while a 64 MP raster alone is ~256 MiB;
  * decoder/encoder overhead at 32-64 MP could exhaust the service's 512 MiB limit.
- * Finalization runs one at a time and each preview is generated sequentially.
+ * Finalization runs one at a time and the two small previews are generated in parallel.
  */
 export async function prepareDirectPreviews(
   stream: () => NodeJS.ReadableStream | Promise<NodeJS.ReadableStream>,
@@ -130,28 +130,35 @@ export async function prepareDirectPreviews(
   const expected = DIRECT_IMAGE_TYPES[declaredType];
   if (!expected) throw new HTTPException(415, { message: "JPEG・PNG・WebP・GIFを選択してください" });
   const pixelLimit = expected === "jpeg" ? MAX_IMAGE_PIXELS : MAX_NON_JPEG_PIXELS;
-  let info: Metadata;
+  let source: NodeJS.ReadableStream | undefined;
+  let destroyInput: (() => void) | undefined;
+  let tasks: Promise<{ result: [Metadata, Buffer, Buffer] } | { error: unknown }> | undefined;
   try {
-    info = await new Promise<Metadata>((resolve, reject) => {
-      const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
-      input.metadata().then(resolve, reject);
-      void Promise.resolve(stream()).then((source) => {
-        source.on("error", (error) => input.destroy(error));
-        source.pipe(input);
-      }, reject);
-    });
+    const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
+    destroyInput = () => input.destroy();
+    const metadata = input.metadata();
+    const smallPreview = input.clone().rotate().resize(512, 512, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: 82 }).toBuffer();
+    const largePreview = input.clone().rotate().resize(1024, 1024, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: 85 }).toBuffer();
+    // Attach rejection handling before opening/awaiting the source so failures cannot
+    // become unhandled while a slow storage stream is being created.
+    tasks = Promise.all([metadata, smallPreview, largePreview]).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+    source = await stream();
+    source.on("error", (error) => input.destroy(error as Error));
+    source.pipe(input);
+    const settled = await tasks;
+    if ("error" in settled) throw settled.error;
+    const [info, small, large] = settled.result;
     if (info.format !== expected || !info.width || !info.height || info.width * info.height > pixelLimit) throw Error("unsupported or too many pixels");
-    const previews = {} as Record<512 | 1024, Buffer>;
-    for (const size of [512, 1024] as const) {
-      const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
-      const task = input.clone().rotate().resize(size, size, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: size === 512 ? 82 : 85 }).toBuffer();
-      const source = await stream();
-      source.on("error", (error) => input.destroy(error));
-      source.pipe(input);
-      previews[size] = await task;
-    }
-    return { width: info.width, height: info.height, contentType: declaredType, previews };
+    return { width: info.width, height: info.height, contentType: declaredType, previews: { 512: small, 1024: large } };
   } catch {
+    source?.unpipe();
+    const destroyable = source as (NodeJS.ReadableStream & { destroy?: () => void }) | undefined;
+    destroyable?.destroy?.();
+    destroyInput?.();
+    await tasks;
     throw new HTTPException(415, { message: `画像を読み込めません。JPEGは最大6400万画素、PNG・WebP・GIFは最大1600万画素です。` });
   }
 }

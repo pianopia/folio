@@ -596,11 +596,11 @@ export async function createApp(options: Options = {}) {
         ? () => objects!.openRead!(pending.storageKey + "/original")
         : async () => {
             const access = await googleToken(userId);
-            const media = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFile!.id)}/?alt=media`, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(60000) });
+            const media = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFile!.id)}?alt=media`, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(60000) });
             if (!media.ok || !media.body) throw new HTTPException(502, { message: "Driveの画像を読み込めませんでした" });
             return readableFromWeb(media.body);
           };
-      // Validation and two preview passes stream the original; never materialize a 100 MB source buffer.
+      // Validation and both previews share one streamed original; never materialize a 100 MB source buffer.
       const previews = await prepareDirectPreviews(previewStream, pending.contentType);
       const artwork: Artwork = {
         id: pending.artworkId, ownerId: userId, title: pending.title, groupId: pending.groupId, collection: pending.collection,
