@@ -147,6 +147,30 @@ test("additional selection and drops keep existing images, deduplicate and enfor
   expect(uploaded).toHaveLength(0);
 });
 
+test("pasting images uses the same selection limits and upload flow", async () => {
+  await setup();
+  fireEvent.paste(window, {
+    clipboardData: {
+      items: [
+        { type: "image/png", getAsFile: () => image("pasted.png") },
+      ],
+    },
+  });
+  expect(screen.getByRole("button", { name: "アップロード（1）" })).toBeTruthy();
+  fireEvent.paste(window, {
+    clipboardData: {
+      items: [
+        {
+          type: "image/svg+xml",
+          getAsFile: () => new File(["svg"], "vector.svg", { type: "image/svg+xml" }),
+        },
+      ],
+    },
+  });
+  expect(screen.getByRole("button", { name: "アップロード（1）" })).toBeTruthy();
+  expect(uploaded).toHaveLength(0);
+});
+
 test("one file failing does not stop the batch, and retry only sends failed files", async () => {
   const input = await setup();
   failed.add("second.png");

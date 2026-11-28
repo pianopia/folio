@@ -12,6 +12,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import * as Clipboard from "expo-clipboard";
 import type { Artwork, Group } from "@folio/shared";
 export default function UploadImages({
   api,
@@ -107,6 +108,38 @@ export default function UploadImages({
       );
     }
   }
+  async function paste() {
+    try {
+      const image = await Clipboard.getImageAsync({ format: "png" });
+      if (!image) {
+        setMessage("クリップボードに画像がありません。画像をコピーしてからお試しください");
+        return;
+      }
+      const base64 = image.data.slice(image.data.indexOf(",") + 1);
+      const size = Math.floor((base64.length * 3) / 4);
+      if (size > 20 * 1024 * 1024) {
+        setMessage("画像は1枚20MB以下にしてください");
+        return;
+      }
+      if (assets.length >= 10) {
+        setMessage("画像は合計10枚までです。不要な画像を外してください");
+        return;
+      }
+      const asset = {
+        uri: image.data,
+        fileName: `clipboard-${Date.now()}.png`,
+        mimeType: "image/png",
+        fileSize: size,
+        width: image.size.width,
+        height: image.size.height,
+      } as unknown as ImagePicker.ImagePickerAsset;
+      setAssets((current) => [...current, asset]);
+      setPreviewIndex(null);
+      setMessage("");
+    } catch {
+      setMessage("クリップボードから画像を読み込めませんでした。権限を確認してください");
+    }
+  }
   async function upload() {
     setPreviewIndex(null);
     setBusy(true);
@@ -119,11 +152,18 @@ export default function UploadImages({
             throw Error("画像は1枚20MB以下にしてください");
           setMessage(`${++count} / ${assets.length} 枚を保存中…`);
           const form = new FormData();
-          form.append("file", {
-            uri: asset.uri,
-            name: asset.fileName || "photo.jpg",
-            type: asset.mimeType || "image/jpeg",
-          } as unknown as Blob);
+          if (asset.uri.startsWith("data:")) {
+            const encoded = asset.uri.slice(asset.uri.indexOf(",") + 1);
+            const decoded = atob(encoded);
+            const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+            form.append("file", new Blob([bytes], { type: asset.mimeType || "image/png" }), asset.fileName || "photo.png");
+          } else {
+            form.append("file", {
+              uri: asset.uri,
+              name: asset.fileName || "photo.jpg",
+              type: asset.mimeType || "image/jpeg",
+            } as unknown as Blob);
+          }
           form.append("groupId", groupId);
           form.append("collection", collection.trim() || "Uploads");
           const response = await fetch(`${api}/api/artworks/upload`, {
@@ -186,6 +226,14 @@ export default function UploadImages({
         <Text style={{ color: "#435238", textAlign: "center" }}>
           {assets.length ? "＋ 写真を追加" : "＋ 写真を選択"}
         </Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        disabled={busy || !status?.canUpload || assets.length >= 10}
+        onPress={paste}
+        style={{ padding: 12, borderRadius: 7, backgroundColor: "#eef2e8" }}
+      >
+        <Text style={{ color: "#435238", textAlign: "center" }}>クリップボードから貼り付け</Text>
       </Pressable>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
         {assets.map((asset, i) => (

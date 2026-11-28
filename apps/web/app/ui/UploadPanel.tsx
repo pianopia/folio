@@ -81,6 +81,30 @@ export default function UploadPanel({
   const mounted = useRef(true);
   const previews = useRef<string[]>([]),
     input = useRef<HTMLInputElement>(null);
+  async function pasteFromClipboard() {
+    if (!navigator.clipboard?.read) {
+      setError("このブラウザーではクリップボードから画像を読み込めません");
+      return;
+    }
+    try {
+      const files: File[] = [];
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find((type) => type.startsWith("image/"));
+        if (type) {
+          const blob = await item.getType(type);
+          const extension = type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+          files.push(new File([blob], `clipboard-${files.length + 1}.${extension}`, { type }));
+        }
+      }
+      if (!files.length) {
+        setError("クリップボードに画像がありません。画像をコピーしてからお試しください");
+        return;
+      }
+      select(files);
+    } catch {
+      setError("クリップボードを読み込めませんでした。ブラウザーの権限を確認してください");
+    }
+  }
   useEffect(() => {
     mounted.current = true;
     let current = true;
@@ -97,6 +121,21 @@ export default function UploadPanel({
       previews.current.forEach(URL.revokeObjectURL);
     };
   }, []);
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      const files = Array.from(event.clipboardData?.items ?? [])
+        .filter((item) => item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => !!file)
+        .map((file, index) => new File([file], file.name || `clipboard-${index + 1}.${file.type.split("/")[1] || "png"}`, { type: file.type }));
+      if (files.length) {
+        event.preventDefault();
+        select(files);
+      }
+    }
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
   function select(files: FileList | File[]) {
     if (busy) return;
     const incoming = Array.from(files);
@@ -260,6 +299,14 @@ export default function UploadPanel({
           }}
         />
       </label>
+      <button
+        type="button"
+        className="button secondary full"
+        disabled={busy || !status?.canUpload}
+        onClick={pasteFromClipboard}
+      >
+        クリップボードから貼り付け
+      </button>
       <div className="form-row">
         <label>
           グループ
