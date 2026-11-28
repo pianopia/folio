@@ -9,7 +9,7 @@ const origin = "https://folio.example";
 function memoryStorage() {
   const data = new Map<string, { bytes: Uint8Array; type: string }>();
   const sessions = new Map<string, string>();
-  let sessionNumber = 0, streamOpens = 0;
+  let sessionNumber = 0, streamOpens = 0, failedReads = 0, failedStreamReads = 0;
   const backend: ObjectStorage = {
     async save(key, bytes, type) {
       data.set(key, { bytes, type });
@@ -33,12 +33,20 @@ function memoryStorage() {
     },
     openRead(key) {
       streamOpens++;
+      if (failedReads > 0) { failedReads--; throw Error("transient source read failure"); }
       const item = data.get(key);
       if (!item) throw Error("not found");
+      if (failedStreamReads > 0) {
+        failedStreamReads--;
+        return Readable.from((async function* () {
+          yield item.bytes.subarray(0, Math.min(8, item.bytes.byteLength));
+          throw Error("transient source stream error");
+        })());
+      }
       return Readable.from([item.bytes]);
     },
   };
-  return { backend, data, sessions, get streamOpens() { return streamOpens; }, uploadSession(url: string, bytes: Uint8Array, type = "image/jpeg") {
+  return { backend, data, sessions, get streamOpens() { return streamOpens; }, failReads(count = 1) { failedReads = count; }, failStreamReads(count = 1) { failedStreamReads = count; }, uploadSession(url: string, bytes: Uint8Array, type = "image/jpeg") {
     const key = sessions.get(url);
     if (!key) throw Error("unknown session");
     data.set(key, { bytes, type });
@@ -245,9 +253,51 @@ test("direct completion rejects size mismatches, corrupt images, and expired ses
     const corrupt = await (await init(corruptBytes.byteLength)).json();
     store.uploadSession(corrupt.uploadUrl, corruptBytes, "image/png");
     expect((await a(`/uploads/${corrupt.uploadId}/complete`, "POST", {})).status).toBe(415);
+    expect(store.data.size).toBe(0);
     const expired = await (await init()).json();
     await db.query("UPDATE pending_uploads SET expires_at=? WHERE upload_id=?").run(Date.now() - 1, expired.uploadId);
     expect((await a(`/uploads/${expired.uploadId}/complete`, "POST", {})).status).toBe(410);
+  } finally { db.close(); }
+});
+
+test("transient source stream open failures keep the original and allow completion retry", async () => {
+  const store = memoryStorage(), { app, db } = await createApp({ database: ":memory:", webOrigin: origin, objectStorage: store.backend });
+  try {
+    await addUser(db, alice, "a");
+    const a = client(app, "a"), group = await (await a("/groups", "POST", { name: "Textures" })).json();
+    const original = await png();
+    const initialized = await a("/uploads/init", "POST", { groupId: group.id, filename: "recovered.png", contentType: "image/png", size: original.byteLength });
+    const session = await initialized.json();
+    store.uploadSession(session.uploadUrl, original, "image/png");
+    store.failReads();
+    const first = await a(`/uploads/${session.uploadId}/complete`, "POST", {});
+    expect(first.status).toBe(502);
+    expect((await first.json()).error).toContain("少し待って再試行");
+    expect(store.data.size).toBe(1);
+    const second = await a(`/uploads/${session.uploadId}/complete`, "POST", {});
+    expect(second.status).toBe(201);
+    expect(store.data.size).toBe(3);
+    expect((await (await a("/library")).json()).artworks).toHaveLength(1);
+    expect((await a(`/uploads/${session.uploadId}/complete`, "POST", {})).status).toBe(200);
+  } finally { db.close(); }
+});
+
+test("source read errors during decoding are retryable and preserve the original", async () => {
+  const store = memoryStorage(), { app, db } = await createApp({ database: ":memory:", webOrigin: origin, objectStorage: store.backend });
+  try {
+    await addUser(db, alice, "a");
+    const a = client(app, "a"), group = await (await a("/groups", "POST", { name: "Textures" })).json();
+    const original = await png();
+    const initialized = await a("/uploads/init", "POST", { groupId: group.id, filename: "interrupted.png", contentType: "image/png", size: original.byteLength });
+    const session = await initialized.json();
+    store.uploadSession(session.uploadUrl, original, "image/png");
+    store.failStreamReads();
+    const first = await a(`/uploads/${session.uploadId}/complete`, "POST", {});
+    expect(first.status).toBe(502);
+    expect(store.data.size).toBe(1);
+    const second = await a(`/uploads/${session.uploadId}/complete`, "POST", {});
+    expect(second.status).toBe(201);
+    expect((await (await a("/library")).json()).artworks).toHaveLength(1);
   } finally { db.close(); }
 });
 

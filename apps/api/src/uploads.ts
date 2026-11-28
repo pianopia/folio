@@ -131,24 +131,46 @@ export async function prepareDirectPreviews(
   if (!expected) throw new HTTPException(415, { message: "JPEG・PNG・WebP・GIFを選択してください" });
   const pixelLimit = expected === "jpeg" ? MAX_IMAGE_PIXELS : MAX_NON_JPEG_PIXELS;
   let source: NodeJS.ReadableStream | undefined;
-  let destroyInput: (() => void) | undefined;
+  let sourceFailed = false;
+  let sourceFailure: unknown;
+  let destroyInput: ((error?: Error) => void) | undefined;
+  let removeSourceErrorListener: (() => void) | undefined;
   let tasks: Promise<{ result: [Metadata, Buffer, Buffer] } | { error: unknown }> | undefined;
   try {
+    try {
+      source = await stream();
+    } catch (error) {
+      sourceFailed = true;
+      sourceFailure = error;
+      throw error;
+    }
     const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
-    destroyInput = () => input.destroy();
+    // Consume the writable input's emitted error; the metadata and clone promises
+    // carry it to the caller, where source I/O can be distinguished from decoding.
+    input.on("error", () => {});
+    destroyInput = (error) => input.destroy(error);
     const metadata = input.metadata();
     const smallPreview = input.clone().rotate().resize(512, 512, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: 82 }).toBuffer();
     const largePreview = input.clone().rotate().resize(1024, 1024, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: 85 }).toBuffer();
-    // Attach rejection handling before opening/awaiting the source so failures cannot
-    // become unhandled while a slow storage stream is being created.
+    // Attach rejection handling before piping the source so failures cannot become
+    // unhandled while Sharp is decoding the stream.
     tasks = Promise.all([metadata, smallPreview, largePreview]).then(
       (result) => ({ result }),
       (error: unknown) => ({ error }),
     );
-    source = await stream();
-    source.on("error", (error) => input.destroy(error as Error));
+    let rejectSourceFailure!: (error: unknown) => void;
+    const sourceFailureTask = new Promise<never>((_resolve, reject) => { rejectSourceFailure = reject; });
+    const onSourceError = (error: Error) => {
+      sourceFailed = true;
+      sourceFailure = error;
+      input.destroy(error);
+      rejectSourceFailure(error);
+    };
+    source.on("error", onSourceError);
+    removeSourceErrorListener = () => source?.removeListener("error", onSourceError);
     source.pipe(input);
-    const settled = await tasks;
+    const settled = await Promise.race([tasks, sourceFailureTask]);
+    removeSourceErrorListener();
     if ("error" in settled) throw settled.error;
     const [info, small, large] = settled.result;
     if (info.format !== expected || !info.width || !info.height || info.width * info.height > pixelLimit) throw Error("unsupported or too many pixels");
@@ -157,8 +179,11 @@ export async function prepareDirectPreviews(
     source?.unpipe();
     const destroyable = source as (NodeJS.ReadableStream & { destroy?: () => void }) | undefined;
     destroyable?.destroy?.();
-    destroyInput?.();
-    await tasks;
+    removeSourceErrorListener?.();
+    destroyInput?.(sourceFailed ? sourceFailure as Error : undefined);
+    if (sourceFailed) {
+      throw new HTTPException(502, { message: "画像の読み込みに失敗しました。少し待って再試行してください" });
+    }
     throw new HTTPException(415, { message: `画像を読み込めません。JPEGは最大6400万画素、PNG・WebP・GIFは最大1600万画素です。` });
   }
 }
