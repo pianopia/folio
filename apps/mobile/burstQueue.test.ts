@@ -2,19 +2,19 @@ import { describe, expect, test } from "bun:test";
 import { BurstQueue, type BurstItem, type BurstResult } from "./burstQueue";
 
 function harness(upload: (item: BurstItem) => Promise<BurstResult>, initiallyOnline = true, seed: string | null = null) {
-  let raw: string | null = seed, now = 10_000, online = initiallyOnline;
+  let raw: string | null = seed, now = 10_000, online = initiallyOnline, userId = "user-1";
   const existing = new Set<string>(), uploads: string[] = [], removed: string[] = [], sleeps: number[] = [];
   const queue = new BurstQueue({
     storage: { get: async () => raw, set: async (v) => { raw = v; } },
     files: { exists: async (uri) => existing.has(uri), remove: async (uri) => { existing.delete(uri); removed.push(uri); } },
     upload: async (item) => { uploads.push(item.id); return upload(item); },
-    now: () => now, sleep: async (ms) => { sleeps.push(ms); now += ms; }, online: () => online, random: () => 0.5,
+    now: () => now, sleep: async (ms) => { sleeps.push(ms); now += ms; }, online: () => online, userId: () => userId, random: () => 0.5,
   });
   const add = async (id: string, extra: Partial<BurstItem> = {}) => {
     const uri = `file://${id}`; existing.add(uri);
-    return queue.enqueue({ id, uri, filename: `${id}.jpg`, groupId: "g", size: 100, createdAt: now, ...extra });
+    return queue.enqueue({ id, userId, uri, filename: `${id}.jpg`, groupId: "g", size: 100, createdAt: now, ...extra });
   };
-  return { queue, add, uploads, existing, removed, sleeps, setOnline: (v: boolean) => { online = v; }, raw: () => raw, advance: (ms: number) => { now += ms; } };
+  return { queue, add, uploads, existing, removed, sleeps, addExisting: (uri: string) => existing.add(uri), setOnline: (v: boolean) => { online = v; }, setUserId: (v: string) => { userId = v; }, raw: () => raw, advance: (ms: number) => { now += ms; } };
 }
 const ok: BurstResult = { ok: true };
 const tick = async () => { for (let i = 0; i < 100; i++) await Promise.resolve(); };
@@ -49,6 +49,27 @@ describe("BurstQueue", () => {
   test("offline queue pauses and resumes when connectivity returns", async () => {
     const h = harness(async () => ok, false); await h.add("offline"); await tick(); expect(h.uploads).toEqual([]);
     h.setOnline(true); h.queue.resume(); await tick(); expect(h.uploads).toEqual(["offline"]);
+  });
+  test("only uploads items for the active account", async () => {
+    const h = harness(async () => ok, false);
+    await h.add("account-a");
+    h.setUserId("user-2"); h.setOnline(true); h.queue.resume(); await tick();
+    expect(h.uploads).toEqual([]);
+    h.setUserId("user-1"); h.queue.resume(); await tick();
+    expect(h.uploads).toEqual(["account-a"]);
+  });
+  test("concurrent restore calls are idempotent and subscribers unsubscribe cleanly", async () => {
+    const source = harness(async () => ok, false); await source.add("once");
+    const h = harness(async () => ok, true, source.raw());
+    h.addExisting("file://once");
+    let notifications = 0;
+    const unsubscribe = h.queue.subscribe(() => { notifications++; });
+    await Promise.all([h.queue.restore(), h.queue.restore()]);
+    h.queue.resume(); h.queue.resume(); await tick();
+    expect(h.uploads).toEqual(["once"]);
+    const beforeUnsubscribe = notifications;
+    unsubscribe(); await h.queue.discard("once");
+    expect(notifications).toBe(beforeUnsubscribe);
   });
   test("oversize and over-pixel files are recorded as failures without upload", async () => {
     const h = harness(async () => ok);

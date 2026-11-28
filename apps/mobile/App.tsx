@@ -1150,6 +1150,7 @@ export default function App() {
       {burstOpen && <BurstCamera
         api={api}
         token={token}
+        userId={userId}
         groups={data.groups.filter((g) => g.ownerId === userId)}
         onUploaded={(art) => setData((d) => ({ artworks: [art, ...d.artworks.filter((a) => a.id !== art.id)], groups: d.groups }))}
         onClose={() => setBurstOpen(false)}

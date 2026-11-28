@@ -1,7 +1,7 @@
 /** Dependency-injected, persistent single-file upload queue. No React Native imports. */
 export type BurstStatus = "待機" | "送信中" | "完了" | "失敗";
 export type BurstItem = {
-  id: string; groupId: string; uri: string; filename: string; size: number;
+  id: string; userId: string; groupId: string; uri: string; filename: string; size: number;
   createdAt: number; status: BurstStatus; attempts: number;
   nextAttemptAt: number; lastError: string | null; width?: number; height?: number;
 };
@@ -13,8 +13,8 @@ export type BurstDeps = {
   now(): number;
   sleep(ms: number): Promise<void>;
   online(): boolean;
+  userId(): string;
   random?(): number;
-  onChange?(items: BurstItem[]): void;
 };
 const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 5 * 60_000;
@@ -26,22 +26,41 @@ export class BurstQueue {
   private items: BurstItem[] = [];
   private running = false;
   private restored = false;
+  private restorePromise: Promise<BurstItem[]> | null = null;
   private writeChain: Promise<void> = Promise.resolve();
+  private subscribers = new Set<(items: BurstItem[]) => void>();
   constructor(private deps: BurstDeps) {}
   getItems() { return this.items.map((item) => ({ ...item })); }
+  subscribe(listener: (items: BurstItem[]) => void) {
+    this.subscribers.add(listener);
+    return () => { this.subscribers.delete(listener); };
+  }
   private async persist() {
     const snapshot = JSON.stringify(this.items);
     this.writeChain = this.writeChain.catch(() => {}).then(() => this.deps.storage.set(snapshot));
     await this.writeChain;
-    this.deps.onChange?.(this.getItems());
+    const items = this.getItems();
+    for (const subscriber of this.subscribers) subscriber(items);
   }
   async restore() {
     if (this.restored) return this.getItems();
+    if (this.restorePromise) return this.restorePromise;
+    this.restorePromise = this.performRestore();
+    try { return await this.restorePromise; }
+    finally { this.restorePromise = null; }
+  }
+  private async performRestore() {
     const raw = await this.deps.storage.get();
     try { this.items = raw ? JSON.parse(raw) as BurstItem[] : []; } catch { this.items = []; }
     const now = this.deps.now();
     this.items = this.items.filter((x) => x.status !== "完了" || now - x.createdAt < RETAIN_DONE_MS);
     for (const item of this.items) {
+      if (!item.userId && item.status !== "完了") {
+        item.userId = "";
+        item.status = "失敗";
+        item.lastError = "保存時のアカウントを確認できません。安全のため再試行できません。不要なら破棄してください。";
+        continue;
+      }
       if (item.status === "送信中") item.status = "待機";
       if (item.status !== "完了" && !(await this.deps.files.exists(item.uri))) {
         item.status = "失敗"; item.lastError = "保存した写真が見つかりません。撮り直してください。";
@@ -64,7 +83,7 @@ export class BurstQueue {
   }
   async retry(id: string) {
     const item = this.items.find((x) => x.id === id);
-    if (!item || item.status !== "失敗") return;
+    if (!item || item.status !== "失敗" || !item.userId || item.userId !== this.deps.userId()) return;
     if (!(await this.deps.files.exists(item.uri))) { item.lastError = "保存した写真が見つかりません。撮り直してください。"; await this.persist(); return; }
     item.status = "待機"; item.attempts = 0; item.nextAttemptAt = this.deps.now(); item.lastError = null;
     await this.persist(); void this.process();
@@ -81,7 +100,9 @@ export class BurstQueue {
     this.running = true;
     try {
       while (this.deps.online()) {
-        const item = this.items.find((x) => x.status === "待機");
+        const currentUserId = this.deps.userId();
+        if (!currentUserId) break;
+        const item = this.items.find((x) => x.status === "待機" && x.userId === currentUserId);
         if (!item) break;
         const wait = item.nextAttemptAt - this.deps.now();
         if (wait > 0) { await this.deps.sleep(wait); if (!this.deps.online()) break; }
