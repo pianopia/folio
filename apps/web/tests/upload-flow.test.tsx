@@ -8,7 +8,7 @@ const originalCreate = URL.createObjectURL,
 let uploaded: string[] = [],
   completed: string[] = [],
   failed = new Set<string>(),
-  urls = 0;
+  urls = 0, directEnabled = false, directPaths: string[] = [];
 class UploadXHR {
   upload: {
     onprogress?: (e: {
@@ -21,12 +21,20 @@ class UploadXHR {
   timeout = 0;
   status = 200;
   responseText = "";
+  method = "";
+  url = "";
   onload?: () => void;
   onerror?: () => void;
   ontimeout?: () => void;
-  open() {}
+  open(method: string, url: string) { this.method = method; this.url = url; }
   setRequestHeader() {}
-  send(form: FormData) {
+  send(form: FormData | File) {
+    if (this.method === "PUT") {
+      uploaded.push("direct-put");
+      setTimeout(() => { this.upload.onprogress?.({ lengthComputable: true, loaded: 10, total: 10 }); this.status = 200; this.onload?.(); }, 0);
+      return;
+    }
+    form = form as FormData;
     const file = form.get("file") as File;
     uploaded.push(file.name);
     setTimeout(() => {
@@ -69,13 +77,14 @@ beforeEach(() => {
   uploaded = [];
   completed = [];
   failed = new Set();
-  globalThis.fetch = (async () =>
-    Response.json({
-      destination: "storage",
-      canUpload: true,
-      reauthRequired: false,
-      maxBytes: 20 * 1024 * 1024,
-    })) as unknown as typeof fetch;
+  directEnabled = false; directPaths = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/api/uploads/status")) return Response.json({ destination: "storage", canUpload: true, reauthRequired: false, maxBytes: 20 * 1024 * 1024, ...(directEnabled ? { directUpload: true, maxDirectBytes: 100 * 1024 * 1024, maxPixels: 64_000_000 } : {}) });
+    if (url.endsWith("/api/uploads/init")) { directPaths.push("init"); return Response.json({ uploadId: "upload-1", uploadUrl: "https://gcs.example/session", method: "PUT", headers: { "Content-Type": "image/png", "Content-Range": "bytes 0-22020095/22020096" } }, { status: 201 }); }
+    if (url.endsWith("/api/uploads/upload-1/complete")) { directPaths.push("complete"); return Response.json({ id: "large.png", title: "large.png", source: "storage" }, { status: 201 }); }
+    return Response.json({});
+  }) as unknown as typeof fetch;
   globalThis.XMLHttpRequest = UploadXHR as unknown as typeof XMLHttpRequest;
   URL.createObjectURL = () => `blob:preview-${++urls}`;
   URL.revokeObjectURL = () => {};
@@ -197,4 +206,15 @@ test("one file failing does not stop the batch, and retry only sends failed file
     "third.png",
     "second.png",
   ]);
+});
+
+test("files over 20MB use resumable direct upload with PUT progress then complete", async () => {
+  directEnabled = true;
+  const input = await setup();
+  const large = new File([new Uint8Array(21 * 1024 * 1024)], "large.png", { type: "image/png" });
+  fireEvent.change(input, { target: { files: [large] } });
+  fireEvent.click(screen.getByRole("button", { name: "アップロード（1）" }));
+  await waitFor(() => expect(completed).toEqual(["large.png"]));
+  expect(directPaths).toEqual(["init", "complete"]);
+  expect(uploaded).toEqual(["direct-put"]);
 });

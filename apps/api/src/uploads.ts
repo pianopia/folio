@@ -1,10 +1,17 @@
-import sharp from "sharp";
+import sharp, { type Metadata } from "sharp";
 import { Storage } from "@google-cloud/storage";
 import { HTTPException } from "hono/http-exception";
+import { Readable } from "node:stream";
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+export const MAX_DIRECT_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_IMAGE_PIXELS = 64_000_000;
+export const MAX_NON_JPEG_PIXELS = 16_000_000;
+export const DIRECT_IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpeg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+};
 export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 sharp.cache(false);
-sharp.concurrency(2);
+sharp.concurrency(1);
 export type PreparedImage = {
   bytes: Buffer;
   contentType: string;
@@ -64,6 +71,9 @@ export interface ObjectStorage {
   save(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
   read(key: string): Promise<Uint8Array>;
   remove(key: string): Promise<void>;
+  createResumableUpload?(key: string, size: number, contentType: string, origin?: string): Promise<string>;
+  stat?(key: string): Promise<{ size: number; contentType?: string }>;
+  openRead?(key: string): NodeJS.ReadableStream;
 }
 export function cloudStorage(
   bucketName = process.env.UPLOAD_BUCKET,
@@ -84,10 +94,102 @@ export function cloudStorage(
     async read(key) {
       return (await bucket.file(key).download())[0];
     },
+    async createResumableUpload(key, size, contentType, origin) {
+      const [url] = await bucket.file(key).createResumableUpload({
+        origin,
+        metadata: { contentType, contentLength: size, cacheControl: "no-store" },
+        preconditionOpts: { ifGenerationMatch: 0 },
+      });
+      return url;
+    },
+    async stat(key) {
+      const [metadata] = await bucket.file(key).getMetadata();
+      return { size: Number(metadata.size), contentType: metadata.contentType };
+    },
+    openRead(key) {
+      return bucket.file(key).createReadStream({ validation: false });
+    },
     async remove(key) {
       await bucket.file(key).delete({ ignoreNotFound: true });
     },
   };
+}
+
+/**
+ * Validate/thumbnail a direct-upload original without buffering the original.
+ * JPEG is allowed to 64 MP because libvips can shrink JPEGs during decode before
+ * creating the tiny previews. PNG/WebP/GIF stay at 16 MP: their full raster can
+ * require ~64 MiB at 16 MP (RGBA), while a 64 MP raster alone is ~256 MiB;
+ * decoder/encoder overhead at 32-64 MP could exhaust the service's 512 MiB limit.
+ * Finalization runs one at a time and the two small previews are generated in parallel.
+ */
+export async function prepareDirectPreviews(
+  stream: () => NodeJS.ReadableStream | Promise<NodeJS.ReadableStream>,
+  declaredType: string,
+) {
+  const expected = DIRECT_IMAGE_TYPES[declaredType];
+  if (!expected) throw new HTTPException(415, { message: "JPEG・PNG・WebP・GIFを選択してください" });
+  const pixelLimit = expected === "jpeg" ? MAX_IMAGE_PIXELS : MAX_NON_JPEG_PIXELS;
+  let source: NodeJS.ReadableStream | undefined;
+  let sourceFailed = false;
+  let sourceFailure: unknown;
+  let destroyInput: ((error?: Error) => void) | undefined;
+  let removeSourceErrorListener: (() => void) | undefined;
+  let tasks: Promise<{ result: [Metadata, Buffer, Buffer] } | { error: unknown }> | undefined;
+  try {
+    try {
+      source = await stream();
+    } catch (error) {
+      sourceFailed = true;
+      sourceFailure = error;
+      throw error;
+    }
+    const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
+    // Consume the writable input's emitted error; the metadata and clone promises
+    // carry it to the caller, where source I/O can be distinguished from decoding.
+    input.on("error", () => {});
+    destroyInput = (error) => input.destroy(error);
+    const metadata = input.metadata();
+    const smallPreview = input.clone().rotate().resize(512, 512, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: 82 }).toBuffer();
+    const largePreview = input.clone().rotate().resize(1024, 1024, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: 85 }).toBuffer();
+    // Attach rejection handling before piping the source so failures cannot become
+    // unhandled while Sharp is decoding the stream.
+    tasks = Promise.all([metadata, smallPreview, largePreview]).then(
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+    let rejectSourceFailure!: (error: unknown) => void;
+    const sourceFailureTask = new Promise<never>((_resolve, reject) => { rejectSourceFailure = reject; });
+    const onSourceError = (error: Error) => {
+      sourceFailed = true;
+      sourceFailure = error;
+      input.destroy(error);
+      rejectSourceFailure(error);
+    };
+    source.on("error", onSourceError);
+    removeSourceErrorListener = () => source?.removeListener("error", onSourceError);
+    source.pipe(input);
+    const settled = await Promise.race([tasks, sourceFailureTask]);
+    removeSourceErrorListener();
+    if ("error" in settled) throw settled.error;
+    const [info, small, large] = settled.result;
+    if (info.format !== expected || !info.width || !info.height || info.width * info.height > pixelLimit) throw Error("unsupported or too many pixels");
+    return { width: info.width, height: info.height, contentType: declaredType, previews: { 512: small, 1024: large } };
+  } catch {
+    source?.unpipe();
+    const destroyable = source as (NodeJS.ReadableStream & { destroy?: () => void }) | undefined;
+    destroyable?.destroy?.();
+    removeSourceErrorListener?.();
+    destroyInput?.(sourceFailed ? sourceFailure as Error : undefined);
+    if (sourceFailed) {
+      throw new HTTPException(502, { message: "画像の読み込みに失敗しました。少し待って再試行してください" });
+    }
+    throw new HTTPException(415, { message: `画像を読み込めません。JPEGは最大6400万画素、PNG・WebP・GIFは最大1600万画素です。` });
+  }
+}
+
+export function readableFromWeb(stream: ReadableStream<Uint8Array>) {
+  return Readable.fromWeb(stream as unknown as import("node:stream/web").ReadableStream<Uint8Array>);
 }
 export async function uploadDriveImage(
   access: string,

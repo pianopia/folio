@@ -4,6 +4,7 @@ import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { openDatabase } from "./database";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { Readable } from "node:stream";
 import type { Artwork, Group } from "@folio/shared";
 import {
   cloudStorage,
@@ -11,6 +12,12 @@ import {
   uploadDriveImage,
   DRIVE_FILE_SCOPE,
   MAX_UPLOAD_BYTES,
+  MAX_DIRECT_UPLOAD_BYTES,
+  MAX_IMAGE_PIXELS,
+  MAX_NON_JPEG_PIXELS,
+  DIRECT_IMAGE_TYPES,
+  prepareDirectPreviews,
+  readableFromWeb,
   type ObjectStorage,
 } from "./uploads";
 import { hash } from "./auth";
@@ -41,9 +48,14 @@ export async function createApp(options: Options = {}) {
       "CREATE TABLE IF NOT EXISTS drive_upload_folders (user_id TEXT PRIMARY KEY, folder_id TEXT NOT NULL)",
     )
     .run();
+  await db.query(
+    "CREATE TABLE IF NOT EXISTS pending_uploads (upload_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, artwork_id TEXT NOT NULL, expires_at INTEGER NOT NULL, lock_until INTEGER, data TEXT NOT NULL)",
+  ).run();
+  await db.query("CREATE INDEX IF NOT EXISTS pending_upload_owner ON pending_uploads(owner_id,expires_at)").run();
   await initializeDeletion(db);
   const objects = options.objectStorage ?? cloudStorage();
   let activeUploads = 0;
+  let activeFinalizers = 0;
   const folderPending = new Map<string, Promise<string>>();
   const origin =
     options.webOrigin ?? process.env.WEB_ORIGIN ?? "http://127.0.0.1:5173";
@@ -454,7 +466,186 @@ export async function createApp(options: Options = {}) {
       canUpload: drive ? writable : Boolean(objects),
       reauthRequired: drive && !writable,
       maxBytes: MAX_UPLOAD_BYTES,
+      directUpload: true,
+      maxDirectBytes: MAX_DIRECT_UPLOAD_BYTES,
+      maxPixels: MAX_IMAGE_PIXELS,
+      maxPixelsByType: { "image/jpeg": MAX_IMAGE_PIXELS, "image/png": MAX_NON_JPEG_PIXELS, "image/webp": MAX_NON_JPEG_PIXELS, "image/gif": MAX_NON_JPEG_PIXELS },
     });
+  });
+  app.post("/api/uploads/init", async (c) => {
+    const body = await parse(c);
+    const userId = c.get("user").id;
+    const groupId = body.groupId;
+    await requireGroup(userId, groupId, true);
+    const size = Number(body.size);
+    if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_DIRECT_UPLOAD_BYTES)
+      throw new HTTPException(413, { message: "画像は1枚100MB以下にしてください" });
+    const contentType = typeof body.contentType === "string" ? body.contentType : "";
+    if (!DIRECT_IMAGE_TYPES[contentType])
+      throw new HTTPException(415, { message: "JPEG・PNG・WebP・GIFを選択してください" });
+    const width = body.width === undefined ? undefined : Number(body.width);
+    const height = body.height === undefined ? undefined : Number(body.height);
+    const pixelLimit = contentType === "image/jpeg" ? MAX_IMAGE_PIXELS : MAX_NON_JPEG_PIXELS;
+    if ((width === undefined) !== (height === undefined) || (width !== undefined && (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height! <= 0 || width * height! > pixelLimit)))
+      throw new HTTPException(413, { message: `画像は${(pixelLimit / 10_000).toLocaleString("ja-JP")}万画素以下にしてください` });
+    const filename = typeof body.filename === "string" ? body.filename.replace(/[\x00-\x1f\x7f/\\]/g, "_").slice(0, 200) : "";
+    if (!filename) throw new HTTPException(400, { message: "画像ファイル名が必要です" });
+    const title = body.title ? name(body.title) : name(filename.replace(/\.[^.]+$/, "").slice(0, 120));
+    const collection = body.collection ? name(body.collection) : "Uploads";
+    const drive = Boolean(await secret(userId));
+    if (drive && !(await canUploadDrive(userId)))
+      throw new HTTPException(409, { message: "Driveへの保存に追加権限が必要です。「アップロード権限を追加」から再接続してください" });
+    if (!drive && (!objects || !objects.createResumableUpload))
+      throw new HTTPException(503, { message: "Cloud Storageの保存先が準備されていません" });
+    const uploadId = crypto.randomUUID();
+    const artworkId = crypto.randomUUID();
+    const storageKey = `users/${hash(userId)}/${artworkId}`;
+    let uploadUrl: string;
+    let folderId: string | undefined;
+    if (drive) {
+      const access = await googleToken(userId);
+      folderId = await driveFolder(userId, access);
+      const response = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${access}`,
+          "Content-Type": "application/json; charset=UTF-8",
+          "X-Upload-Content-Type": contentType,
+          "X-Upload-Content-Length": String(size),
+        },
+        body: JSON.stringify({ name: filename, parents: [folderId] }),
+        signal: AbortSignal.timeout(20000),
+      });
+      uploadUrl = response.headers.get("location") ?? "";
+      if (!response.ok || !uploadUrl) throw new HTTPException(502, { message: "Driveのアップロードセッションを開始できませんでした" });
+    } else {
+      uploadUrl = await objects!.createResumableUpload!(storageKey + "/original", size, contentType, c.req.header("Origin"));
+    }
+    const expiresAt = Date.now() + 60 * 60_000;
+    const pending = { ownerId: userId, groupId: String(groupId), artworkId, storageKey, target: drive ? "drive" : "storage", folderId, uploadUrl, size, contentType, filename, title, collection, createdAt: new Date().toISOString(), expiresAt, state: "pending" };
+    await db.query("INSERT INTO pending_uploads(upload_id,owner_id,artwork_id,expires_at,data) VALUES(?,?,?,?,?)")
+      .run(uploadId, userId, artworkId, expiresAt, JSON.stringify(pending));
+    return c.json({ uploadId, uploadUrl, method: "PUT", headers: { "Content-Type": contentType, "Content-Range": `bytes 0-${size - 1}/${size}` }, expiresAt }, 201);
+  });
+  app.post("/api/uploads/:uploadId/complete", async (c) => {
+    const userId = c.get("user").id;
+    const uploadId = c.req.param("uploadId");
+    const row = await db.query("SELECT owner_id,artwork_id,expires_at,lock_until,data FROM pending_uploads WHERE upload_id=?").get(uploadId);
+    if (!row || row.owner_id !== userId) throw new HTTPException(404, { message: "アップロードがありません" });
+    const pending = JSON.parse(String(row.data)) as {
+      ownerId: string; groupId: string; artworkId: string; storageKey: string; target: "storage" | "drive"; folderId?: string;
+      uploadUrl: string; size: number; contentType: string; filename: string; title: string; collection: string; createdAt: string; expiresAt: number; state: string; driveId?: string;
+    };
+    const existing = await get<Artwork>("art", pending.artworkId);
+    if (existing) {
+      pending.state = "complete";
+      await db.query("UPDATE pending_uploads SET data=?,lock_until=NULL WHERE upload_id=?").run(JSON.stringify(pending), uploadId);
+      return c.json(existing, 200);
+    }
+    if (Number(row.expires_at) < Date.now()) {
+      if (pending.target === "storage") await objects?.remove(pending.storageKey + "/original").catch(() => {});
+      await db.query("DELETE FROM pending_uploads WHERE upload_id=?").run(uploadId);
+      throw new HTTPException(410, { message: "アップロードの有効期限が切れました。もう一度アップロードしてください" });
+    }
+    if (pending.state === "failed") throw new HTTPException(410, { message: "このアップロードは無効です。もう一度アップロードしてください" });
+    await requireGroup(userId, pending.groupId, true);
+    const now = Date.now();
+    const locked = await db.query("UPDATE pending_uploads SET lock_until=? WHERE upload_id=? AND (lock_until IS NULL OR lock_until<?)").run(now + 120_000, uploadId, now);
+    if (!locked.rowsAffected) throw new HTTPException(429, { message: "画像を確認中です。少し待って再試行してください" });
+    if (activeFinalizers >= 1) {
+      await db.query("UPDATE pending_uploads SET lock_until=NULL WHERE upload_id=?").run(uploadId);
+      throw new HTTPException(429, { message: "画像の確認が混み合っています。少し待って再試行してください" });
+    }
+    activeFinalizers++;
+    try {
+      let driveFile: { id: string; name: string; mimeType: string; thumbnailLink?: string; thumbnailVersion?: string } | undefined;
+      let objectSize: number;
+      let actualType = pending.contentType;
+      if (pending.target === "storage") {
+        if (!objects?.stat || !objects.openRead) throw new HTTPException(503, { message: "Cloud Storageの読み込み機能がありません" });
+        let stat: { size: number; contentType?: string };
+        try { stat = await objects.stat(pending.storageKey + "/original"); }
+        catch { throw new HTTPException(409, { message: "画像のアップロードが完了していません" }); }
+        objectSize = stat.size;
+        actualType = stat.contentType || pending.contentType;
+      } else {
+        const access = await googleToken(userId);
+        const probe = await fetch(pending.uploadUrl, {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${access}`, "Content-Range": `bytes */${pending.size}` },
+          body: "",
+          signal: AbortSignal.timeout(30000),
+        });
+        if (probe.status === 308) throw new HTTPException(409, { message: "画像のアップロードが完了していません" });
+        if (probe.status === 404 || probe.status === 410) throw new HTTPException(410, { message: "Driveのアップロードセッションの有効期限が切れました。もう一度アップロードしてください" });
+        const completed = probe.ok ? await probe.json().catch(() => ({})) as { id?: string } : {};
+        const driveId = completed.id;
+        if (!probe.ok || !driveId) throw new HTTPException(502, { message: "Driveのアップロード状態を確認できませんでした" });
+        const metaResponse = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveId)}?fields=id,name,size,mimeType,parents,imageMediaMetadata,thumbnailLink,thumbnailVersion`, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(20000) });
+        if (!metaResponse.ok) throw new HTTPException(502, { message: "Driveの画像情報を確認できませんでした" });
+        const meta = await metaResponse.json() as { id: string; name?: string; size?: string; mimeType?: string; parents?: string[]; thumbnailLink?: string; thumbnailVersion?: string };
+        if (!meta.id || !meta.parents?.includes(pending.folderId ?? "")) throw new HTTPException(404, { message: "アップロードしたDrive画像を確認できません" });
+        driveFile = { ...meta, name: meta.name || pending.filename, mimeType: meta.mimeType || pending.contentType };
+        objectSize = Number(meta.size);
+        actualType = meta.mimeType || pending.contentType;
+        pending.driveId = driveId;
+      }
+      if (objectSize !== pending.size || objectSize > MAX_DIRECT_UPLOAD_BYTES) throw new HTTPException(413, { message: "アップロードされた画像のサイズが一致しません。もう一度アップロードしてください" });
+      if (actualType !== pending.contentType || !DIRECT_IMAGE_TYPES[actualType]) throw new HTTPException(415, { message: "画像形式が一致しません。JPEG・PNG・WebP・GIFを選択してください" });
+      const previewStream = pending.target === "storage"
+        ? () => objects!.openRead!(pending.storageKey + "/original")
+        : async () => {
+            const access = await googleToken(userId);
+            const media = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFile!.id)}?alt=media`, { headers: { Authorization: `Bearer ${access}` }, signal: AbortSignal.timeout(60000) });
+            if (!media.ok || !media.body) throw new HTTPException(502, { message: "Driveの画像を読み込めませんでした" });
+            return readableFromWeb(media.body);
+          };
+      // Validation and both previews share one streamed original; never materialize a 100 MB source buffer.
+      const previews = await prepareDirectPreviews(previewStream, pending.contentType);
+      const artwork: Artwork = {
+        id: pending.artworkId, ownerId: userId, title: pending.title, groupId: pending.groupId, collection: pending.collection,
+        url: `/api/artworks/${pending.artworkId}/image`, tags: [], favorite: false, createdAt: pending.createdAt,
+        source: pending.target, uploaded: true, contentType: pending.contentType,
+        ...(pending.target === "storage" ? { storageKey: pending.storageKey } : { driveId: driveFile!.id }),
+      };
+      if (pending.target === "storage") {
+        try {
+          await objects!.save(pending.storageKey + "/512.webp", previews.previews[512], "image/webp");
+          await objects!.save(pending.storageKey + "/1024.webp", previews.previews[1024], "image/webp");
+          await save("art", artwork);
+        } catch {
+          await Promise.allSettled([objects!.remove(pending.storageKey + "/512.webp"), objects!.remove(pending.storageKey + "/1024.webp")]);
+          throw new HTTPException(502, { message: "画像情報を保存できませんでした。完了操作を再試行してください" });
+        }
+      } else {
+        try {
+          await save("art", artwork);
+        } catch {
+          await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFile!.id)}`, {
+            method: "DELETE", headers: { Authorization: `Bearer ${await googleToken(userId)}` },
+          }).catch(() => {});
+          throw new HTTPException(502, { message: "画像情報を保存できませんでした。完了操作を再試行してください" });
+        }
+        cache(userId).clear();
+        cache(userId).remember(driveFile!);
+        cache(userId).seedPreview(driveFile!.id, 512, previews.previews[512]);
+        cache(userId).seedPreview(driveFile!.id, 1024, previews.previews[1024]);
+      }
+      pending.state = "complete"; pending.driveId = driveFile?.id;
+      await db.query("UPDATE pending_uploads SET data=?,lock_until=NULL WHERE upload_id=?").run(JSON.stringify(pending), uploadId);
+      return c.json(artwork, 201);
+    } catch (error) {
+      if (error instanceof HTTPException && [413, 415].includes(error.status)) {
+        pending.state = "failed";
+        await db.query("UPDATE pending_uploads SET data=? WHERE upload_id=?").run(JSON.stringify(pending), uploadId);
+        if (pending.target === "storage") await objects?.remove(pending.storageKey + "/original").catch(() => {});
+        else if (pending.driveId) await fetch(`https://www.googleapis.com/drive/v3/files/${pending.driveId}`, { method: "DELETE", headers: { Authorization: `Bearer ${await googleToken(userId)}` } }).catch(() => {});
+      }
+      throw error;
+    } finally {
+      activeFinalizers--;
+      await db.query("UPDATE pending_uploads SET lock_until=NULL WHERE upload_id=? AND lock_until IS NOT NULL").run(uploadId).catch(() => {});
+    }
   });
   app.post("/api/artworks/upload", async (c) => {
     if (activeUploads >= 2)
@@ -684,10 +875,11 @@ export async function createApp(options: Options = {}) {
   );
   async function storageImage(art: Artwork, size?: 512 | 1024) {
     if (!objects || !art.storageKey) throw new HTTPException(404);
-    const bytes = await objects.read(
-      `${art.storageKey}/${size ? `${size}.webp` : "original"}`,
-    );
-    return new Response(bytes as BodyInit, {
+    const key = `${art.storageKey}/${size ? `${size}.webp` : "original"}`;
+    const body = objects.openRead
+      ? Readable.toWeb(objects.openRead(key)) as unknown as ReadableStream<Uint8Array>
+      : await objects.read(key) as BodyInit;
+    return new Response(body, {
       headers: {
         "Content-Type": size
           ? "image/webp"
