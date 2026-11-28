@@ -16,13 +16,47 @@ type Status = {
   canUpload: boolean;
   reauthRequired: boolean;
   maxBytes: number;
+  directUpload?: boolean;
+  maxDirectBytes?: number;
+  maxPixels?: number;
 };
 function upload(
   file: File,
   groupId: string,
   collection: string,
   onProgress: (value: number) => void,
+  status: Status | null,
 ) {
+  const legacyLimit = status?.maxBytes ?? 20 * 1024 * 1024;
+  if (file.size > legacyLimit && status?.directUpload && status.maxDirectBytes) {
+    return (async () => {
+      const session = await request<{
+        uploadId: string; uploadUrl: string; method: "PUT"; headers: Record<string, string>;
+      }>("/uploads/init", {
+        method: "POST",
+        body: JSON.stringify({ groupId, filename: file.name, contentType: file.type, size: file.size, collection }),
+      });
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(session.method, session.uploadUrl);
+        xhr.withCredentials = false;
+        xhr.timeout = 120000;
+        for (const [key, value] of Object.entries(session.headers)) xhr.setRequestHeader(key, value);
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 95));
+        };
+        xhr.onerror = () => reject(Error("大きな画像のアップロードに失敗しました。接続または保存先のCORS設定を確認してください。"));
+        xhr.ontimeout = () => reject(Error("大きな画像のアップロードがタイムアウトしました。"));
+        xhr.onload = () => xhr.status >= 200 && xhr.status < 300
+          ? resolve()
+          : reject(Error(`大きな画像のアップロードに失敗しました（${xhr.status}）。`));
+        xhr.send(file);
+      });
+      const artwork = await request<Artwork>(`/uploads/${encodeURIComponent(session.uploadId)}/complete`, { method: "POST", body: JSON.stringify({}) });
+      onProgress(100);
+      return artwork;
+    })();
+  }
   return new Promise<Artwork>((resolve, reject) => {
     const form = new FormData();
     form.append("file", file);
@@ -125,15 +159,15 @@ export default function UploadPanel({
       return;
     }
     if (
-      unique.some(
+        unique.some(
         (file) =>
-          file.size > 20 * 1024 * 1024 ||
+          file.size > (status?.maxDirectBytes ?? 20 * 1024 * 1024) ||
           !["image/jpeg", "image/png", "image/webp", "image/gif"].includes(
             file.type,
           ),
       )
     ) {
-      setError("JPEG・PNG・WebP・GIFを1枚20MB以下で選択してください");
+      setError(`JPEG・PNG・WebP・GIFを1枚${Math.floor((status?.maxDirectBytes ?? 20 * 1024 * 1024) / (1024 * 1024))}MB以下で選択してください`);
       return;
     }
     const added: Item[] = unique.map((file) => ({
@@ -181,7 +215,7 @@ export default function UploadPanel({
         change(item.id, { state: "uploading", progress: 0, error: undefined });
         try {
           const art = await upload(item.file, groupId, collection.trim(), (p) =>
-            change(item.id, { progress: p }),
+            change(item.id, { progress: p }), status,
           );
           if (!mounted.current) break;
           change(item.id, { state: "done", progress: 100 });
@@ -228,7 +262,7 @@ export default function UploadPanel({
       )}
       <label
         className={`upload-dropzone${dragging ? " dragging" : ""}`}
-        title="JPEG / PNG / WebP / GIF · 20MBまで · 最大10枚 · ドロップ可"
+        title={`JPEG / PNG / WebP / GIF · ${Math.floor((status?.maxDirectBytes ?? 20 * 1024 * 1024) / (1024 * 1024))}MBまで · 最大10枚 · ドロップ可`}
         onDragOver={(e) => {
           e.preventDefault();
           setDragging(true);

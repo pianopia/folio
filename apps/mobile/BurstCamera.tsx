@@ -6,11 +6,9 @@ import { Directory, File, Paths } from "expo-file-system";
 import * as LegacyFileSystem from "expo-file-system/legacy";
 import * as Crypto from "expo-crypto";
 import type { Artwork, Group } from "@folio/shared";
-import { BurstQueue, type BurstItem } from "./burstQueue";
+import { BurstQueue, MAX_BYTES, MAX_PIXELS, uploadBurstItem, type BurstItem, type BurstResult } from "./burstQueue";
 
 const KEY = "folio-burst-queue-v1";
-const MAX_BYTES = 20 * 1024 * 1024;
-const MAX_PIXELS = 32_000_000;
 const bytesLabel = (n: number) => n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)}GB` : `${(n / 1024 ** 2).toFixed(0)}MB`;
 
 type BurstRuntime = { api: string; token: string; userId: string; online: boolean; onUploaded: (art: Artwork) => void };
@@ -33,21 +31,48 @@ function getSharedQueue() {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     online: () => runtime.online && !!runtime.userId && !!runtime.token,
     userId: () => runtime.userId,
-    upload: async (item) => {
+    upload: async (item, update) => {
       if (!runtime.token || item.userId !== runtime.userId) return { ok: false, status: 403, message: "アカウントが切り替わりました。現在のアカウントでは送信できません。" };
-      try {
+      const collection = `撮影モード ${new Date(item.createdAt).toLocaleDateString("ja-JP")}`;
+      const request = async (path: string, body?: unknown): Promise<{ response: Response; data: any }> => {
+        const response = await fetch(`${runtime.api}${path}`, { method: "POST", headers: { Authorization: `Bearer ${runtime.token}`, ...(body ? { "Content-Type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(100000) });
+        return { response, data: await response.json().catch(() => ({})) };
+      };
+      const legacy = async (): Promise<BurstResult> => {
         const form = new FormData();
-        form.append("file", { uri: item.uri, name: item.filename, type: "image/jpeg" } as unknown as Blob);
+        form.append("file", { uri: item.uri, name: item.filename, type: item.contentType || "image/jpeg" } as unknown as Blob);
         form.append("groupId", item.groupId);
-        form.append("collection", `撮影モード ${new Date(item.createdAt).toLocaleDateString("ja-JP")}`);
+        form.append("collection", collection);
         const response = await fetch(`${runtime.api}/api/artworks/upload`, { method: "POST", headers: { Authorization: `Bearer ${runtime.token}` }, body: form, signal: AbortSignal.timeout(100000) });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) return { ok: false as const, status: response.status, message: body.error || body.message || "アップロードできませんでした" };
         if (runtime.userId === item.userId) runtime.onUploaded(body as Artwork);
         return { ok: true as const };
+      };
+      try {
+        return await uploadBurstItem(item, update, {
+        legacy,
+        init: async (current) => {
+          const { response, data } = await request("/api/uploads/init", { groupId: current.groupId, filename: current.filename, contentType: current.contentType || "image/jpeg", size: current.size, width: current.width, height: current.height, collection });
+          if (!response.ok) return { ok: false, status: response.status, message: data.error || data.message || "アップロードを開始できませんでした" };
+          return { uploadId: data.uploadId, uploadUrl: data.uploadUrl, headers: data.headers };
+        },
+        put: async (current) => {
+          const response = await LegacyFileSystem.uploadAsync(current.uploadUrl!, current.uri, { httpMethod: "PUT", uploadType: LegacyFileSystem.FileSystemUploadType.BINARY_CONTENT, headers: current.uploadHeaders });
+          if (response.status >= 200 && response.status < 300) return { ok: true };
+          let data: any = {}; try { data = JSON.parse(response.body); } catch {}
+          return { ok: false, status: response.status, message: data.error || data.message || `画像の送信に失敗しました (${response.status})` };
+        },
+        complete: async (current) => {
+          const { response, data } = await request(`/api/uploads/${encodeURIComponent(current.uploadId!)}/complete`);
+          if (!response.ok) return { ok: false, status: response.status, message: data.error || data.message || "画像の確認に失敗しました" };
+          if (runtime.userId === item.userId) runtime.onUploaded(data as Artwork);
+          return { ok: true };
+        },
+        });
       } catch (error) {
         publishOnline(false);
-        return { ok: false as const, message: (error as Error).message || "通信に失敗しました", retryable: true };
+        return { ok: false, message: (error as Error).message || "通信に失敗しました", retryable: true };
       }
     },
   });
@@ -131,7 +156,7 @@ export default function BurstCamera({ api, token, userId, groups, onUploaded, on
           const id = Crypto.randomUUID(); const filename = `${id}.jpg`;
           const destination = new File(directory, filename);
           await LegacyFileSystem.copyAsync({ from: picture.uri, to: destination.uri });
-          await queue.enqueue({ id, userId, groupId, uri: destination.uri, filename, size: destination.size, createdAt: Date.now(), width: picture.width, height: picture.height });
+          await queue.enqueue({ id, userId, groupId, uri: destination.uri, filename, size: destination.size, createdAt: Date.now(), width: picture.width, height: picture.height, contentType: "image/jpeg" });
         } catch { setCaptureError("写真を保存できませんでした。端末の空き容量を確認してください。"); }
       })();
     } catch {
@@ -161,12 +186,12 @@ export default function BurstCamera({ api, token, userId, groups, onUploaded, on
           <View style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: 16, gap: 10, backgroundColor: "#0009" }}>
             {!online && <Text style={{ color: "#ffd27a", textAlign: "center" }}>オフライン — 接続を確認しています</Text>}
             {!!captureError && <Text style={{ color: "#ffb5a7", textAlign: "center" }}>{captureError}</Text>}
-            {cameraReady && !sizeReady && <Text style={{ color: "#ffd27a", textAlign: "center" }}>3200万画素以下の撮影サイズを確認しています…</Text>}
+            {cameraReady && !sizeReady && <Text style={{ color: "#ffd27a", textAlign: "center" }}>6400万画素以下の撮影サイズを確認しています…</Text>}
             {pendingBytes > 1024 ** 3 && <Text style={{ color: "#ffd27a", textAlign: "center" }}>未送信の写真が {bytesLabel(pendingBytes)} あります</Text>}
             <Text style={{ color: "white", textAlign: "center" }}>待機 {counts.wait}　送信中 {counts.sending}　完了 {counts.done}　失敗 {counts.failed}</Text>
             <ScrollView horizontal contentContainerStyle={{ gap: 8, justifyContent: "center" }}>{items.slice(-6).reverse().map((item) => item.status === "完了" ? <View key={item.id} style={{ width: 48, height: 48, borderRadius: 5, backgroundColor: "#54734a", alignItems: "center", justifyContent: "center" }}><Text style={{ color: "white", fontSize: 22 }}>✓</Text></View> : <Image key={item.id} source={{ uri: item.uri }} style={{ width: 48, height: 48, borderRadius: 5 }} />)}</ScrollView>
             <Pressable disabled={!cameraReady || !sizeReady || capturing || !ready || Paths.availableDiskSpace < MAX_BYTES + 30 * 1024 * 1024} onPress={() => void shoot()} style={{ alignSelf: "center", width: 76, height: 76, borderRadius: 40, backgroundColor: capturing ? "#bbb" : "white", borderWidth: 6, borderColor: "#a9bc9d", alignItems: "center", justifyContent: "center" }}><Text style={{ fontSize: 28, color: "#35452e" }}>●</Text></Pressable>
-            <Text style={{ color: "#eee", textAlign: "center", fontSize: 12 }}>3200万画素以下の最大サイズで撮影します。写真は圧縮しません。</Text>
+            <Text style={{ color: "#eee", textAlign: "center", fontSize: 12 }}>6400万画素以下の最大サイズで撮影します。写真は圧縮しません。</Text>
           </View>
           {showQueue && <View style={{ position: "absolute", top: 70, bottom: 190, left: 12, right: 12, backgroundColor: "#f8f8f3", borderRadius: 12, padding: 12 }}>
             <ScrollView>{items.slice().reverse().map((item) => <View key={item.id} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 9, borderBottomWidth: 1, borderColor: "#ddd", gap: 10 }}>

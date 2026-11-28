@@ -4,12 +4,14 @@ export type BurstItem = {
   id: string; userId: string; groupId: string; uri: string; filename: string; size: number;
   createdAt: number; status: BurstStatus; attempts: number;
   nextAttemptAt: number; lastError: string | null; width?: number; height?: number;
+  contentType?: string; uploadId?: string; uploadUrl?: string; uploadHeaders?: Record<string, string>;
+  uploadPhase?: "put" | "complete";
 };
 export type BurstResult = { ok: true } | { ok: false; status?: number; message: string; retryable?: boolean };
 export type BurstDeps = {
   storage: { get(): Promise<string | null>; set(value: string): Promise<void> };
   files: { exists(uri: string): Promise<boolean>; remove(uri: string): Promise<void> };
-  upload(item: BurstItem): Promise<BurstResult>;
+  upload(item: BurstItem, update: (patch: Partial<BurstItem>) => Promise<void>): Promise<BurstResult>;
   now(): number;
   sleep(ms: number): Promise<void>;
   online(): boolean;
@@ -19,8 +21,77 @@ export type BurstDeps = {
 const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 5 * 60_000;
 const RETAIN_DONE_MS = 24 * 60 * 60_000;
-const MAX_BYTES = 20 * 1024 * 1024;
-const MAX_PIXELS = 32_000_000;
+export const MAX_BYTES = 100 * 1024 * 1024;
+export const MAX_PIXELS = 64_000_000;
+export const LEGACY_MAX_BYTES = 20 * 1024 * 1024;
+
+export type DirectSession = { uploadId: string; uploadUrl: string; headers?: Record<string, string> };
+export type BurstTransport = {
+  legacy(item: BurstItem): Promise<BurstResult>;
+  init(item: BurstItem): Promise<DirectSession | BurstResult>;
+  put(item: BurstItem): Promise<BurstResult>;
+  complete(item: BurstItem): Promise<BurstResult>;
+};
+
+/** Persist each resumable stage so retries can safely resume after a lost response. */
+export async function uploadBurstItem(item: BurstItem, update: (patch: Partial<BurstItem>) => Promise<void>, transport: BurstTransport): Promise<BurstResult> {
+  if (item.size <= LEGACY_MAX_BYTES) return transport.legacy(item);
+  let current = { ...item };
+  const save = async (patch: Partial<BurstItem>) => { current = { ...current, ...patch }; await update(patch); };
+  const startSession = async () => {
+    const initialized = await transport.init(current);
+    if ("ok" in initialized) return initialized;
+    await save({ uploadId: initialized.uploadId, uploadUrl: initialized.uploadUrl, uploadHeaders: initialized.headers, uploadPhase: "put" });
+    return null;
+  };
+  if (current.uploadPhase === "complete") {
+    const result = await transport.complete(current);
+    if (result.ok) return result;
+    if (result.status === 409) await save({ uploadPhase: "put" });
+    else if (result.status === 404 || result.status === 410)
+      await save({ uploadId: undefined, uploadUrl: undefined, uploadHeaders: undefined, uploadPhase: undefined });
+    else return result;
+  }
+  const restoringPut = current.uploadPhase === "put" && !!current.uploadId && !!current.uploadUrl;
+  if (!current.uploadId || !current.uploadUrl || current.uploadPhase !== "put") {
+    const failed = await startSession();
+    if (failed) return failed;
+  }
+  if (restoringPut) {
+    // A previous PUT may have reached storage even if its response was lost.
+    const completed = await transport.complete(current);
+    if (completed.ok) return completed;
+    if (completed.status !== 404 && completed.status !== 410 && completed.status !== 409) return completed;
+    if (completed.status === 404 || completed.status === 410) {
+      await save({ uploadId: undefined, uploadUrl: undefined, uploadHeaders: undefined, uploadPhase: undefined });
+      const failed = await startSession();
+      if (failed) return failed;
+    }
+  }
+  let put = await transport.put(current);
+  if (!put.ok && (put.status === 404 || put.status === 410)) {
+    const completed = await transport.complete(current);
+    if (completed.ok) return completed;
+    if (completed.status !== 404 && completed.status !== 410 && completed.status !== 409) return completed;
+    await save({ uploadId: undefined, uploadUrl: undefined, uploadHeaders: undefined, uploadPhase: undefined });
+    const failed = await startSession();
+    if (failed) return failed;
+    put = await transport.put(current);
+  }
+  if (!put.ok) return put;
+  await save({ uploadPhase: "complete" });
+  const completed = await transport.complete(current);
+  if (!completed.ok && (completed.status === 404 || completed.status === 410)) {
+    await save({ uploadId: undefined, uploadUrl: undefined, uploadHeaders: undefined, uploadPhase: undefined });
+    const failed = await startSession();
+    if (failed) return failed;
+    const secondPut = await transport.put(current);
+    if (!secondPut.ok) return secondPut;
+    await save({ uploadPhase: "complete" });
+    return transport.complete(current);
+  }
+  return completed;
+}
 
 export class BurstQueue {
   private items: BurstItem[] = [];
@@ -73,9 +144,9 @@ export class BurstQueue {
   async enqueue(item: Omit<BurstItem, "status" | "attempts" | "nextAttemptAt" | "lastError">) {
     if (!this.restored) await this.restore();
     const record: BurstItem = { ...item, status: "待機", attempts: 0, nextAttemptAt: this.deps.now(), lastError: null };
-    if (record.size > MAX_BYTES) { record.status = "失敗"; record.lastError = "画像は1枚20MB以下にしてください。撮り直してください。"; }
+    if (record.size > MAX_BYTES) { record.status = "失敗"; record.lastError = "画像は1枚100MB以下にしてください。撮り直してください。"; }
     else if (record.width && record.height && record.width * record.height > MAX_PIXELS) {
-      record.status = "失敗"; record.lastError = "写真が3200万画素を超えています。撮影サイズを変更してください。";
+      record.status = "失敗"; record.lastError = "写真が6400万画素を超えています。撮影サイズを変更してください。";
     }
     this.items.push(record); await this.persist();
     if (record.status === "待機") void this.process();
@@ -108,7 +179,7 @@ export class BurstQueue {
         if (wait > 0) { await this.deps.sleep(wait); if (!this.deps.online()) break; }
         item.status = "送信中"; await this.persist();
         let result: BurstResult;
-        try { result = await this.deps.upload({ ...item }); }
+        try { result = await this.deps.upload({ ...item }, async (patch) => { Object.assign(item, patch); await this.persist(); }); }
         catch (e) { result = { ok: false, message: (e as Error).message || "通信に失敗しました", retryable: true }; }
         if (result.ok) {
           item.status = "完了"; item.lastError = null;

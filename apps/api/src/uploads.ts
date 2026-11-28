@@ -1,10 +1,17 @@
-import sharp from "sharp";
+import sharp, { type Metadata } from "sharp";
 import { Storage } from "@google-cloud/storage";
 import { HTTPException } from "hono/http-exception";
+import { Readable } from "node:stream";
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+export const MAX_DIRECT_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_IMAGE_PIXELS = 64_000_000;
+export const MAX_NON_JPEG_PIXELS = 16_000_000;
+export const DIRECT_IMAGE_TYPES: Record<string, string> = {
+  "image/jpeg": "jpeg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+};
 export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 sharp.cache(false);
-sharp.concurrency(2);
+sharp.concurrency(1);
 export type PreparedImage = {
   bytes: Buffer;
   contentType: string;
@@ -64,6 +71,9 @@ export interface ObjectStorage {
   save(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
   read(key: string): Promise<Uint8Array>;
   remove(key: string): Promise<void>;
+  createResumableUpload?(key: string, size: number, contentType: string, origin?: string): Promise<string>;
+  stat?(key: string): Promise<{ size: number; contentType?: string }>;
+  openRead?(key: string): NodeJS.ReadableStream;
 }
 export function cloudStorage(
   bucketName = process.env.UPLOAD_BUCKET,
@@ -84,10 +94,70 @@ export function cloudStorage(
     async read(key) {
       return (await bucket.file(key).download())[0];
     },
+    async createResumableUpload(key, size, contentType, origin) {
+      const [url] = await bucket.file(key).createResumableUpload({
+        origin,
+        metadata: { contentType, contentLength: size, cacheControl: "no-store" },
+        preconditionOpts: { ifGenerationMatch: 0 },
+      });
+      return url;
+    },
+    async stat(key) {
+      const [metadata] = await bucket.file(key).getMetadata();
+      return { size: Number(metadata.size), contentType: metadata.contentType };
+    },
+    openRead(key) {
+      return bucket.file(key).createReadStream({ validation: false });
+    },
     async remove(key) {
       await bucket.file(key).delete({ ignoreNotFound: true });
     },
   };
+}
+
+/**
+ * Validate/thumbnail a direct-upload original without buffering the original.
+ * JPEG is allowed to 64 MP because libvips can shrink JPEGs during decode before
+ * creating the tiny previews. PNG/WebP/GIF stay at 32 MP: their full raster can
+ * require ~64 MiB at 16 MP (RGBA), while a 64 MP raster alone is ~256 MiB;
+ * decoder/encoder overhead at 32-64 MP could exhaust the service's 512 MiB limit.
+ * Finalization runs one at a time and each preview is generated sequentially.
+ */
+export async function prepareDirectPreviews(
+  stream: () => NodeJS.ReadableStream | Promise<NodeJS.ReadableStream>,
+  declaredType: string,
+) {
+  const expected = DIRECT_IMAGE_TYPES[declaredType];
+  if (!expected) throw new HTTPException(415, { message: "JPEG・PNG・WebP・GIFを選択してください" });
+  const pixelLimit = expected === "jpeg" ? MAX_IMAGE_PIXELS : MAX_NON_JPEG_PIXELS;
+  let info: Metadata;
+  try {
+    info = await new Promise<Metadata>((resolve, reject) => {
+      const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
+      input.metadata().then(resolve, reject);
+      void Promise.resolve(stream()).then((source) => {
+        source.on("error", (error) => input.destroy(error));
+        source.pipe(input);
+      }, reject);
+    });
+    if (info.format !== expected || !info.width || !info.height || info.width * info.height > pixelLimit) throw Error("unsupported or too many pixels");
+    const previews = {} as Record<512 | 1024, Buffer>;
+    for (const size of [512, 1024] as const) {
+      const input = sharp({ limitInputPixels: pixelLimit, sequentialRead: true, failOn: "warning" });
+      const task = input.clone().rotate().resize(size, size, { fit: "inside", withoutEnlargement: true, fastShrinkOnLoad: true }).webp({ quality: size === 512 ? 82 : 85 }).toBuffer();
+      const source = await stream();
+      source.on("error", (error) => input.destroy(error));
+      source.pipe(input);
+      previews[size] = await task;
+    }
+    return { width: info.width, height: info.height, contentType: declaredType, previews };
+  } catch {
+    throw new HTTPException(415, { message: `画像を読み込めません。JPEGは最大6400万画素、PNG・WebP・GIFは最大1600万画素です。` });
+  }
+}
+
+export function readableFromWeb(stream: ReadableStream<Uint8Array>) {
+  return Readable.fromWeb(stream as unknown as import("node:stream/web").ReadableStream<Uint8Array>);
 }
 export async function uploadDriveImage(
   access: string,
